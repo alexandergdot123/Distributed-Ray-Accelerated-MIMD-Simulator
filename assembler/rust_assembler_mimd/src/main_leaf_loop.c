@@ -256,7 +256,6 @@ else if (left_bitfield_check == 0 && right_bitfield_check == 0)
                         {
                             goto ensure_space_in_queue;
                         }
-                        //skip_adding_queue_to_emergency_queue:
                         queue_address_low -= 16;
                         int tail = atomic_add_dram(queue_address_low, 64);
                         tail &= 0x00003FFF;
@@ -344,6 +343,8 @@ else if (left_bitfield_check == 0 && right_bitfield_check == 0)
                             uint32_t core_to_cache = load_dram_word(queue_address_low + 28);
                             node->core_owner = core_to_cache;
                         }
+                        //skip_adding_queue_to_emergency_queue:
+                        queue_address_low = node->queue_low_bit_addr;
                         queue_address_low += 20;
                         atomic_add_dram(queue_address_low, -1);
                         ray->active_ray = 0;

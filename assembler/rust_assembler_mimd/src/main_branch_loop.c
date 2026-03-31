@@ -394,6 +394,8 @@ else if (left_bitfield_check == 0 && right_bitfield_check == 0)
                             uint32_t core_to_cache = load_dram_word(queue_address_low + 28);
                             node->core_owner = core_to_cache;
                         }
+                        //skip_adding_queue_to_emergency_queue:
+                        queue_address_low = node->queue_low_bit_addr;
                         queue_address_low += 20;
                         atomic_add_dram(queue_address_low, -1);
                         ray->active_ray = 0;
