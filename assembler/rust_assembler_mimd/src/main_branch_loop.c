@@ -1546,6 +1546,7 @@ set_address_bits(top_node_bits);
     AABB_Node_DRAM *dram_node = &dram_nodes[dram_idx];
     uint32_t bottom_node_bits = self.node_array_low;
     bottom_node_bits += dram_idx * 48;
+    //THE FOLLOWING DRAM OFFSETS ARE NOT PERFECT - THE NODE STRUCTURE MUST BE BUILT SOON
     // -- copy bounding box --
     uint32_t x_min = load_dram_word(bottom_node_bits);
     node->x_min = x_min;
