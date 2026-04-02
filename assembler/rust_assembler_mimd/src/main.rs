@@ -35,6 +35,7 @@ fn opcode_table() -> HashMap<&'static str, u32> {
         ("setctx", 36),
         ("relinquish", 37),
         ("intena", 38),
+        ("intdis", 55),
         ("setmembits", 39),
 
         ("lb_d", 40), ("lbu_d", 41), ("lh_d", 42), ("lhu_d", 43),
@@ -231,11 +232,21 @@ fn assemble_instruction(
             set_imm1(&mut instr, 1);
             return instr;
         }
-        38 => { // intena: intena MAILBOX, bool
-            if args.len() != 2 { panic!("intena expects: intena MAILBOX, true|false"); }
-            set_imm(&mut instr, parse_imm_or_label(args[0], labels));
-            if parse_bool(args[1]) { set_imm1(&mut instr, 1); } else {set_imm1(&mut instr, 0);}
-            return instr;
+        38 | 55 => { // intena/intdis SR1|IMM16
+            if args.len() != 1 { panic!("intena expects: intena sr1|IMM16"); }
+            let (is_imm, base) = if args[0].starts_with('r') {
+                (false, parse_reg(args[0]) as u16)
+            } else {
+                (true, parse_imm_or_label(args[0], labels))
+            };
+            if is_imm{
+                set_imm(&mut instr, base);
+                set_imm1(&mut instr, 1);
+            }
+            else {
+                set_sr2(&mut instr, base as u32);
+                set_imm1(&mut instr, 0);
+            }
         }
         39 => { // setmembits: setmembits rS1
             if args.len() != 1 { panic!("setmembits expects: setmembits rS1"); }

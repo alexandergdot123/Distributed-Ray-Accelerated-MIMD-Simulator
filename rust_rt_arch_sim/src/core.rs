@@ -384,7 +384,8 @@ pub enum Operation {
     GetThreadOwnership,
     SetCtx,
     RelinquishOwnership,
-    ModifyInterruptEnable,
+    EnableInterrupts,
+    DisableInterrupts,
     SetMemoryBits,
 
     ReadSignedByteDram,
@@ -398,6 +399,7 @@ pub enum Operation {
     AtomicAddDram,
     SendFlit,
     GetLowClock,
+
 }
 #[derive(Copy, Clone)]
 enum FpType {
@@ -576,7 +578,7 @@ fn decode_instruction(instruction_word: u32, pc: u16) -> DecodedInstruction {
         35 => Operation::GetThreadOwnership,
         36 => Operation::SetCtx,
         37 => Operation::RelinquishOwnership,
-        38 => Operation::ModifyInterruptEnable,
+        38 => Operation::EnableInterrupts,
         39 => Operation::SetMemoryBits,
         40 => Operation::ReadSignedByteDram,
         41 => Operation::ReadUnsignedByteDram,
@@ -593,6 +595,7 @@ fn decode_instruction(instruction_word: u32, pc: u16) -> DecodedInstruction {
         52 => Operation::GetLowClock,
         53 => Operation::BranchLTEU,
         54 => Operation::BranchGTU,
+        55 => Operation::DisableInterrupts,
         _ => panic!("UNKNOWN OPERATION"),
     };
     let fp_type = match (instruction_word >> 20) & 0x3 {
@@ -635,7 +638,6 @@ fn num_source_registers(instr: &DecodedInstruction) -> u8 {
         | GetThreadOwnership
         | RelinquishOwnership
         | NonBlockVal
-        | ModifyInterruptEnable
         | SetCtx => 0,
         Jump | FPSetAccumulator | SetMemoryBits => 1,
         StoreByte | StoreHalf | StoreWord | AtomicAdd | Add | Sub | And | Or | Xor | Sll | Srl | Sra => {
@@ -645,7 +647,7 @@ fn num_source_registers(instr: &DecodedInstruction) -> u8 {
                 2
             }
         }
-        LoadByteSigned | LoadByteUnsigned | LoadHalfSigned | LoadHalfUnsigned | LoadWord => {
+        LoadByteSigned | LoadByteUnsigned | LoadHalfSigned | LoadHalfUnsigned | LoadWord | EnableInterrupts | DisableInterrupts => {
             if instr.is_imm { 0 } else { 1 }
         }
 
@@ -727,7 +729,7 @@ pub struct Core {
 
     output_noc_send: SpscQueue<Flit>,
     noc_recv_fifo: Vec<SpscQueue<u32>>,
-    interrupt_enable: Vec<bool>,
+    interrupt_enable: Vec<Vec<bool>>,
 
     fetched_value: Option<u32>,
 
@@ -800,7 +802,7 @@ impl Core {
 
                 noc_input_pipes
             },
-            interrupt_enable: vec![false; NUM_NOC_PIPES],
+            interrupt_enable: vec![vec![false; NUM_NOC_PIPES]; CTX_CNT],
             div_seq: SpscQueue::<PipelineStage>::new(1),
             fetched_value: None,
             decoded_instruction: None,
@@ -2362,7 +2364,7 @@ impl Core {
                             let mut interrupt_pending = false;
                             let mut index = 0;
                             for fifo in &self.noc_recv_fifo {
-                                if !fifo.is_empty() && self.interrupt_enable[index] {
+                                if !fifo.is_empty() && self.interrupt_enable[self.context_in_progress][index] {
                                     interrupt_pending = true;
                                     break;
                                 }
@@ -2432,13 +2434,35 @@ impl Core {
                             self.pc[context] = self.pc[self.context_in_progress];
                         }
                     }
-                    Operation::ModifyInterruptEnable => {
+                    Operation::EnableInterrupts => {
+
+                        let pipe = if instruction_to_execute.imm_1 != 0 {
+                            instruction_to_execute.imm_0 as usize
+                        } else {
+                            self.register_file
+                                [self.context_in_progress * REGS_PER_CONTEXT + instruction_to_execute.sr2]
+                                as usize
+                        };
                         assert!(
-                            instruction_to_execute.imm_0 < NUM_NOC_PIPES as u32,
+                            pipe < NUM_NOC_PIPES,
                             "IMM IS LESS THAN NUMBER OF NOC PIPES DUMMY"
                         );
-                        self.interrupt_enable[instruction_to_execute.imm_0 as usize] =
-                            instruction_to_execute.imm_1 != 0;
+                        self.interrupt_enable[self.context_in_progress][pipe] = true;
+                        self.pc[self.context_in_progress] += 4;
+                    }
+                    Operation::DisableInterrupts => {
+                        let pipe = if instruction_to_execute.imm_1 != 0 {
+                            instruction_to_execute.imm_0 as usize
+                        } else {
+                            self.register_file
+                                [self.context_in_progress * REGS_PER_CONTEXT + instruction_to_execute.sr2]
+                                as usize
+                        };
+                        assert!(
+                            pipe < NUM_NOC_PIPES,
+                            "IMM IS LESS THAN NUMBER OF NOC PIPES DUMMY"
+                        );
+                        self.interrupt_enable[self.context_in_progress][pipe] = false;
                         self.pc[self.context_in_progress] += 4;
                     }
                     Operation::SetMemoryBits => {
