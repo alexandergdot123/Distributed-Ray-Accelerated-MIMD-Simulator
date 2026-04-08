@@ -549,6 +549,16 @@ set_address_bits(queue_address_high);
 int cur_ray_count = load_dram_word(queue_address_low + 8);
 if (cur_ray_count > 0)
 {
+    if(cur_ray_count >= 256){
+        uint32_t pulled_from_full_queue_address = self.pulled_from_full_queue_address;
+        uint32_t num_times_pulled_from_full_queue = atomic_add(pulled_from_full_queue_address, 1);
+        if(num_times_pulled_from_full_queue > LEAF_BUSY_THRESHOLD){
+            leaf_core_ask_for_help();
+        }
+        else{
+            *(self->pulled_from_full_queue_address) = 0;
+        }
+    }
     int cur_ray_count_check = atomic_add_dram(queue_address_low + 8, -1);
     if (cur_ray_count_check <= 0)
     {
@@ -608,6 +618,7 @@ goto switch_dram_queue;
 
 yield();
 // check_done
+is_idle_leaf();
 uint32_t finished_ray_high = self.ray_result_addr_high;
 set_address_bits(finished_ray_high);
 uint32_t finished_ray_low = self.ray_result_addr_low;

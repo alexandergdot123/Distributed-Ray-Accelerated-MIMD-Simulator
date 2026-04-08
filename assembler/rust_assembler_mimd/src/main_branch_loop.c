@@ -195,6 +195,39 @@ typedef struct {
     node_slot slots[64];
 }  emergency_node_queue;
 
+typedef struct {
+    uint16_t core_id;
+    uint16_t  is_valid;
+} idle_queue_slot;
+
+typedef struct {
+    uint32_t head_relative;   
+    uint32_t tail_relative;   
+    uint32_t count;           
+    uint32_t lock;            
+    idle_queue_slot slots[256];
+} idle_core_queue_dram;
+
+
+typedef struct {
+    uint32_t rays_processed;      // atomically incremented on each ray completion
+    uint32_t last_observed_cycle; // cycle when window last reset
+    uint8_t  previously_idle;     // 1 if was idle last window
+} core_handled;
+
+
+#define IDLE_WINDOW     1000000  // cycles between idle checks
+#define IDLE_THRESHOLD  100      // rays/window below this = idle
+#define BUSY_THRESHOLD  128      // queue depth above this = busy
+
+// Branch-specific thresholds
+#define BRANCH_IDLE_THRESHOLD  50   // forwards/window below this = idle
+#define BRANCH_BUSY_THRESHOLD  200  // forwards/window above this = busy
+
+
+
+#define IDLE_WINDOW 1000000
+#define IDLE_THRESHOLD 100 
 
 const ray_ack = 5;
 const reject_ray = 7;
@@ -603,6 +636,16 @@ set_address_bits(queue_address_high);
 int cur_ray_count = load_dram_word(queue_address_low + 8); // check if there are any rays in the queue
 if (cur_ray_count > 0)
 {
+    if(cur_ray_count >= 256){
+        uint32_t pulled_from_full_queue_address = self.pulled_from_full_queue_address;
+        uint32_t num_times_pulled_from_full_queue = atomic_add(pulled_from_full_queue_address, 1);
+        if(num_times_pulled_from_full_queue > BRANCH_BUSY_THRESHOLD){
+            branch_core_ask_for_help();
+        }
+        else{
+            *(self->pulled_from_full_queue_address) = 0;
+        }
+    }
     int cur_ray_count_check = atomic_add_dram(queue_address_low + 8, -1); // decrement the count of rays in the queue
     if (cur_ray_count_check <= 0)
     {                                              // if another core took the last ray, we should check again
@@ -661,6 +704,7 @@ store_dram_byte(emergency_queue_low + 2, 0);
 *(self.local_queue_flushing + 4) = new_node_id;
 goto switch_dram_queue;
 
+is_idle_branch();
 // check_spawned_ray_pool
 uint32_t spawned_ray_pool_high = self.spawned_ray_pool_high;
 set_address_bits(spawned_ray_pool_high);
@@ -1737,167 +1781,147 @@ return;
 
 
 
-typedef struct {
-    uint16_t core_id;
-    uint8_t  is_valid;
-} idle_queue_slot;
-
-typedef struct {
-    uint32_t head_relative;   
-    uint32_t tail_relative;   
-    uint32_t count;           
-    uint32_t lock;            
-    idle_queue_slot slots[256];
-} idle_core_queue_dram;
-
-
-typedef struct {
-    uint32_t rays_processed;      // atomically incremented on each ray completion
-    uint32_t last_observed_cycle; // cycle when window last reset
-    uint8_t  previously_idle;     // 1 if was idle last window
-} core_handled;
-
-
-#define IDLE_WINDOW     1000000  // cycles between idle checks
-#define IDLE_THRESHOLD  100      // rays/window below this = idle
-#define BUSY_THRESHOLD  128      // queue depth above this = busy
-
-// Branch-specific thresholds
-#define BRANCH_IDLE_THRESHOLD  50   // forwards/window below this = idle
-#define BRANCH_BUSY_THRESHOLD  200  // forwards/window above this = busy
-
-
-
-#define IDLE_WINDOW 1000000
-#define IDLE_THRESHOLD 100 
 
 bool is_idle_leaf() {
     uint32_t current_cycle = get_cycle_count();
     uint32_t last_observed_cycle = self.core_handled->last_observed_cycle;
-
-    if (current_cycle - last_observed_cycle < IDLE_WINDOW) {
-        return self.core_handled->previously_idle; // window not elapsed, return last state
+    uint32_t time_diff = current_cycle - last_observed_cycle;
+    if (time_diff < IDLE_WINDOW) {
+        return 0; 
     }
 
-    // DOUBLE CHECK
     if(self.core_handled->previously_idle) {
-        return true;
+        return 0;
     }
 
     uint32_t rays_processed = self.core_handled->rays_processed;
 
     self.core_handled->rays_processed = 0;
     self.core_handled->last_observed_cycle = current_cycle;
-
-
-    if (rays_processed >= IDLE_THRESHOLD) {
-        return false;
+    rays_processed <<= 16;
+    uint32_t ratio = rays_processed / time_diff;
+    if (time_diff >= IDLE_THRESHOLD) {
+        return 0;
     }
-
-    if (!(self.core_handled->previously_idle)) {
-        add_idle_core();
-    }
-
+    add_idle_core();
     self.core_handled->previously_idle = 1;
-    return true;
+    return 1;
 }
 
-bool is_busy_leaf() {
-    int queue_address_high = self.node->queue_high_bit_addr;
-    set_address_bits(queue_address_high);
-    int queue_address_low = self.node->queue_low_bit_addr;
-    uint32_t count = load_dram_word(queue_address_low + 8); // count field
-    if (count > BUSY_THRESHOLD) {
-        return true;
-    }
-    return false;
-}
+// bool is_busy_leaf() {
+//     int queue_address_high = self.node->queue_high_bit_addr;
+//     set_address_bits(queue_address_high);
+//     int queue_address_low = self.node->queue_low_bit_addr;
+//     uint32_t count = load_dram_word(queue_address_low + 8); // count field
+//     if (count > BUSY_THRESHOLD) {
+//         return true;
+//     }
+//     return false;
+// }
 
+//inlined the above func
 
 bool is_idle_branch() {
+    uint32_t current_cycle = get_cycle_count();
+    uint32_t last_observed_cycle = self.core_handled->last_observed_cycle;
+    uint32_t time_diff = current_cycle - last_observed_cycle;
+    if (time_diff < IDLE_WINDOW) {
+        return 0; 
+    }
+
+    if(self.core_handled->previously_idle) {
+        return 0;
+    }
+
+    uint32_t rays_processed = self.core_handled->rays_processed;
+
+    self.core_handled->rays_processed = 0;
+    self.core_handled->last_observed_cycle = current_cycle;
+    rays_processed <<= 16;
+    uint32_t ratio = rays_processed / time_diff;
+    if (time_diff >= BRANCH_IDLE_THRESHOLD) {
+        return 0;
+    }
+
+
     uint32_t queue_address_high = self.node->queue_high_bit_addr;
     set_address_bits(queue_address_high);
     uint32_t queue_address_low = self.node->queue_low_bit_addr;
-    
-
-    int32_t lock = -1;
-    while (lock >= 0) {
-        lock = atomic_add_dram(queue_address_low + 24, 1);
+    queue_address_low += 20;
+    //loop_on_is_idle_branch_lock:
+    int32_t lock = atomic_add_dram(queue_address_low, 1);
+    if(lock < 0){
+        atomic_add_dram(queue_address_low, -1);
+        goto loop_on_is_idle_branch_lock;
     }
-    uint32_t core_owner_count = load_dram_word(queue_address_low + 24); // double check 24
-    atomic_add_dram(queue_address_low + 24, -1);
-
+    uint32_t core_owner_count = load_dram_word(queue_address_low + 4); // double check 24
+    atomic_add_dram(queue_address_low, -1);
 
     if (core_owner_count == 1) {
         self.core_handled->previously_idle = 0;
-        return false;
+        return 0;
     }
 
-    uint32_t current_cycle = get_cycle_count();
-    uint32_t last_observed_cycle = self.core_handled->last_observed_cycle;
-
-    if (current_cycle - last_observed_cycle < IDLE_WINDOW) {
-        return self.core_handled->previously_idle;
-    }
-
-    uint32_t rays_forwarded = self.core_handled->rays_forwarded;
-
-    self.core_handled->rays_forwarded = 0;
-    self.core_handled->last_observed_cycle = current_cycle;
-
-    if (rays_forwarded >= BRANCH_IDLE_THRESHOLD) {
-        self.core_handled->previously_idle = 0;
-        return false;
-    }
-
-    if (!(self.core_handled->previously_idle)) {
-        add_idle_core();
-    }
-
+    add_idle_core();
     self.core_handled->previously_idle = 1;
-    return true;
+    return 1;
 }
 
-bool is_busy_branch() {
+// bool is_busy_branch() {
 
-    uint32_t current_cycle = get_cycle_count();
-    uint32_t last_observed_cycle = self.core_handled->last_observed_cycle;
+//     uint32_t current_cycle = get_cycle_count();
+//     uint32_t last_observed_cycle = self.core_handled->last_observed_cycle;
 
-    if (current_cycle - last_observed_cycle < IDLE_WINDOW) {
-        return false;
-    }
+//     if (current_cycle - last_observed_cycle < IDLE_WINDOW) {
+//         return false;
+//     }
 
-    // get lock
-    int32_t lock = -1;
-    while (lock >= 0) {
-        lock = atomic_add_dram(queue_address_low + 24, 1);
-    }
-    uint32_t core_owner_count = load_dram_word(queue_address_low + 24); // double check 24
-    atomic_add_dram(queue_address_low + 24, -1);
+//     // get lock
+//     int32_t lock = -1;
+//     while (lock >= 0) {
+//         lock = atomic_add_dram(queue_address_low + 24, 1);
+//     }
+//     uint32_t core_owner_count = load_dram_word(queue_address_low + 24); // double check 24
+//     atomic_add_dram(queue_address_low + 24, -1);
 
-    if (core_owner_count == 1) {
-        self.core_handled->previously_idle = 0;
-        return false;
-    }
+//     if (core_owner_count == 1) {
+//         self.core_handled->previously_idle = 0;
+//         return false;
+//     }
 
-    uint32_t rays_forwarded = self.core_handled->rays_forwarded;
+//     uint32_t rays_forwarded = self.core_handled->rays_forwarded;
 
-    if (rays_forwarded >= BRANCH_BUSY_THRESHOLD) {
-        return true;
-    }
+//     if (rays_forwarded >= BRANCH_BUSY_THRESHOLD) {
+//         return true;
+//     }
 
-    return false;
-}
+//     return false;
+// }
+
+//inlined above function
 
 void add_idle_core() {
     uint32_t idle_queue_address_high = self.idle_queue_address_high;
     set_address_bits(idle_queue_address_high);
     uint32_t idle_queue_address_low = self.idle_queue_address_low;
-    uint32_t slot_index = atomic_add_dram(idle_queue_address_low + 4, 1);
-    slot_index = slot_index & 0xFF;
-    uint32_t slot_address = idle_queue_address_low + 8 + slot_index * 8;
-    store_dram_half(self.core_id, slot_address);
-    store_dram_byte(1, slot_address + 2);
+    idle_queue_address_low += 8;
+    //idle_core_insert_spinlock:
+    uint32_t old_count = atomic_add_dram(idle_queue_address_low, 1);
+    if(old_count > 256){
+        atomic_add_dram(idle_queue_address_low, -1);
+        goto idle_core_insert_spinlock;
+    }
+    idle_queue_address -= 4;
+    uint32_t slot_index = atomic_add_dram(idle_queue_address_low, 4);
+    slot_index = slot_index & 0x3FF;
+    uint32_t slot_address = idle_queue_address_low + slot_index;
+    //wait_for_idle_queue_slot_to_open:
+    uint32_t is_open = load_dram_half(slot_address + 10);
+    if(is_open != 0){
+        goto wait_for_idle_queue_slot_to_open;
+    }
+    store_dram_half(self.core_id, slot_address + 8);
+    store_dram_byte(1, slot_address + 10);
 }
 
 
