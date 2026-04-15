@@ -2077,6 +2077,9 @@ goto dfs_done_but_leaf;
 struct leaf_geo_alloc_info
 {
     // DRAM source locations       
+    uint32_t index_array_low;
+    uint32_t vertex_array_low;
+
     uint32_t node_byte_offset;     
     uint32_t node_byte_count;      
       
@@ -2088,28 +2091,246 @@ struct leaf_geo_alloc_info
 } ;
 
 
-// dram_nodes <- TODO ask alex bby about bvh download
-// ASSUME according to previous convention:
+// // dram_nodes <- TODO ask alex bby about bvh download
+// // ASSUME according to previous convention:
 
-void leaf_node_idx_vertex_allocator()
+// void leaf_node_idx_vertex_allocator()
+// {
+//     set_address_bits(self.node_array_high); 
+//     uint32_t dram_src = self.node_array_low + self.leaf_alloc.node_byte_offset;
+//     uint32_t sram_dst = self.sram_nodes;
+//     uint32_t words    = self.leaf_alloc.node_byte_count >> 2;
+//     uint32_t i = 0;
+// node_copy_loop:
+//     if (i >= words) goto node_copy_done;
+//     *(sram_dst) = load_dram_word(dram_src);
+//     dram_src += 4;
+//     sram_dst += 4;
+//     i += 1;
+//     goto node_copy_loop;
+// node_copy_done:
+
+
+//     set_address_bits(self.node_array_high); // assuming same high bits
+//     dram_src = self.index_array_low + self.leaf_alloc.index_byte_offset;
+//     words    = self.leaf_alloc.index_byte_count >> 2;
+//     i = 0;
+// index_copy_loop:
+//     if (i >= words) goto index_copy_done;
+//     *(sram_dst) = load_dram_word(dram_src);
+//     dram_src += 4;
+//     sram_dst += 4;
+//     i += 1;
+//     goto index_copy_loop;
+// index_copy_done:
+
+
+//     set_address_bits(self.vertex_array_high);
+//     dram_src = self.vertex_array_low + self.leaf_alloc.vertex_byte_offset;
+//     words    = self.leaf_alloc.vertex_byte_count >> 2;
+//     i = 0;
+// vertex_copy_loop:
+//     if (i >= words) goto vertex_copy_done;
+//     *(sram_dst) = load_dram_word(dram_src);
+//     dram_src += 4;
+//     sram_dst += 4;
+//     i += 1;
+//     goto vertex_copy_loop;
+// vertex_copy_done:
+
+//     return;
+// }
+
+
+
+
+
+
+
+
+
+
+// ============================================================
+// download_bvh_nodes
+// ============================================================
+// Pulls BVH nodes from DRAM into SRAM, starting at DRAM index 0.
+// Allocates nodes from sram_nodes[] pool using sram_alloc_count.
+//
+// Inputs:
+//   self->core_id          : this core's ID
+//   dram_nodes             : base pointer to DRAM node array
+//   sram_nodes             : base pointer to SRAM node pool
+//   self->sram_alloc_count : next free slot in sram_nodes (initially 0)
+//
+// Outputs:
+//   self->root_node        : pointer to the SRAM node whose core_owner == self->core_id
+//   sram_nodes populated with downloaded tree
+// ============================================================
+
+typedef struct {
+    uint32_t dram_tri_byte_index;
+    uint16_t *parent_ptr;    // absolute SRAM pointer to parent node, 0 for root
+    uint16_t *parent_left;   // pointer to parent's left_child field (to patch)
+    uint16_t *parent_right;  // pointer to parent's right_child field (to patch)
+    uint16_t is_right;        // 1 if this node is the right child of parent
+    uint32_t depth;
+} DFS_Entry;
+
+typedef struct
 {
-    set_address_bits(self.node_array_high); 
-    uint32_t dram_src = self.node_array_low + self.leaf_alloc.node_byte_offset;
-    uint32_t sram_dst = self.sram_nodes;
-    uint32_t words    = self.leaf_alloc.node_byte_count >> 2;
-    uint32_t i = 0;
-node_copy_loop:
-    if (i >= words) goto node_copy_done;
-    *(sram_dst) = load_dram_word(dram_src);
-    dram_src += 4;
-    sram_dst += 4;
-    i += 1;
-    goto node_copy_loop;
-node_copy_done:
+    // DRAM source locations       
+    uint32_t node_byte_offset;     
+    uint32_t node_byte_count;      
+      
+    uint32_t index_byte_offset;    
+    uint32_t index_byte_count;     
 
+    uint32_t vertex_byte_offset;   
+    uint32_t vertex_byte_count;    
+} leaf_geo_alloc_info;
+
+void download_bvh_tree() {
+    DFS_Entry dfs_stack[17];
+    uint32_t stack_top = dfs_stack + 16;
+    *(self.sram_alloc_count) = self.node_array_top; // TODO: TF is this Alex???? 
+    uint32_t top_node_bits = self.node_array_high;
+    set_address_bits(top_node_bits);
+    // -- push root onto stack --
+    *(dfs_stack - 16) = 0;
+    *(dfs_stack - 12) = 0xFFFF; // invalid pointer to indicate root
+    *(dfs_stack - 10) = 0;
+    *(dfs_stack - 8) = 0;
+    *(dfs_stack - 6) = 0;
+    *(dfs_stack - 4) = 0;
+    *(dfs_stack - 2) = 0;
+    uint32_t leaf_node_table_ptr = self.leaf_core_lookup_table;
+dfs_loop:
+    if (stack_top == self.stack_top) {
+        goto dfs_done;
+    }
+    // -- pop --
+    stack_top-=16;
+    uint32_t dram_idx       = *(stack_top);
+    uint16_t *parent_ptr    = *(stack_top + 4);
+    uint16_t *patch_left    = *(stack_top + 6);
+    uint16_t *patch_right   = *(stack_top + 8);
+    uint16_t is_right        = *(stack_top + 10);
+    uint32_t depth           = *(stack_top + 12);
+
+    // -- allocate SRAM slot --
+
+    uint32_t sram_slot_address = self.sram_node_base_address;
+    uint32_t node = atomic_add(sram_slot_address, 48);
+    // -- load DRAM node --
+    AABB_Node_DRAM *dram_node = &dram_nodes[dram_idx];
+    uint32_t bottom_node_bits = self.node_array_low;
+    bottom_node_bits += dram_idx * 48;
+    //THE FOLLOWING DRAM OFFSETS ARE NOT PERFECT - THE NODE STRUCTURE MUST BE BUILT SOON
+    // -- copy bounding box --
+    uint32_t x_min = load_dram_word(bottom_node_bits);
+    node->x_min = x_min;
+    uint32_t x_max = load_dram_word(bottom_node_bits + 4);
+    node->x_max = x_max;
+    uint32_t y_min = load_dram_word(bottom_node_bits + 8);
+    node->y_min = y_min;
+    uint32_t y_max = load_dram_word(bottom_node_bits + 12);
+    node->y_max = y_max;
+    uint32_t z_min = load_dram_word(bottom_node_bits + 16);
+    node->z_min = z_min;
+    uint32_t z_max = load_dram_word(bottom_node_bits + 20);
+    node->z_max = z_max;
+
+    // -- copy metadata --
+    uint16_t core_owner = load_dram_half(bottom_node_bits + 30);
+    node->core_owner       = core_owner;
+    uint16_t queue_high_bit_addr = load_dram_half(bottom_node_bits + 40);
+    uint32_t queue_low_bit_addr = load_dram_word(bottom_node_bits + 32);
+    node->queue_low_bit_addr  = queue_low_bit_addr;
+    node->queue_high_bit_addr = queue_high_bit_addr;
+    uint32_t node_id = load_dram_word(bottom_node_bits + 48);
+    node->node_id          = node_id;
+    uint16_t all_ones = 0xFFFF;
+    node->prev_index       = all_ones;
+    node->is_right         = is_right;
+
+    // -- set parent pointer --
+    node->parent = parent_ptr;
+
+    // -- default children to 0 (leaf / foreign owner) --
+    node->left_child  = all_ones; // 0xFFFF indicates no child
+    node->right_child = all_ones; // 0xFFFF indicates no child
+
+    // if(depth > 12 && core_owner != 0xFFFF){
+    //     *leaf_node_table_ptr = node;
+    //     leaf_node_table_ptr += 2;
+    // }
+
+    uint32_t will_recurse = (core_owner == all_ones) || (core_owner == self.core_id);
+    if (!will_recurse) {
+        *leaf_node_table_ptr = node;
+        leaf_node_table_ptr += 2;
+    }
+
+
+    // -- patch parent's child pointer to point to us --
+    if (parent_ptr != all_ones) goto patch_parent;
+    goto skip_patch;
+
+patch_parent:
+    if (is_right == 1) goto patch_right_child;
+    *patch_left = node;
+    goto skip_patch;
+
+patch_right_child:
+    *patch_right = node;
+
+skip_patch:
+    // -- check if this node is our root --
+    uint16_t owner = dram_node->core_owner;
+    if (owner != self->core_id) goto check_recurse;
+    self->root_node = node;
+
+check_recurse:
+    // -- decide whether to recurse into children --
+    // recurse if: owner == 0xFFFF OR owner == self->core_id
+    if (owner == all_ones) {} goto do_recurse;
+    if (owner == self->core_id) {
+        self.node_id = node_id;
+        goto do_recurse;
+    }
+    // foreign owner: do not recurse, children stay 0
+    goto dfs_loop;
+
+do_recurse:
+    // -- push right child first (so left is processed first) --
+    uint32_t right_idx = load_dram_word(bottom_node_bits + 24);
+    uint32_t left_idx = load_dram_word(bottom_node_bits + 28);
+    *(stack_top + 0) = right_idx;
+    *(stack_top + 4) = node;
+    *(stack_top + 6) = &node->left_child;
+    *(stack_top + 8) = &node->right_child;
+    *(stack_top + 10) = 1;
+    *(stack_top + 12) = depth + 1;
+
+
+    stack_top += 16;
+
+    // -- push left child --
+    *(stack_top + 0) = left_idx;
+    *(stack_top + 4) = node;
+    *(stack_top + 6) = &node->left_child;
+    *(stack_top + 8) = &node->right_child;
+    *(stack_top + 10) = 0;
+    *(stack_top + 12) = depth + 1;
+    stack_top += 16;
+
+    goto dfs_loop;
+
+dfs_done:
+    *(self.leaf_core_lookup_table + 256) = self->root_node;  // offset 128*2 = 256
 
     set_address_bits(self.node_array_high); // assuming same high bits
-    dram_src = self.index_array_low + self.leaf_alloc.index_byte_offset;
+    dram_src = self.leaf_alloc.vertex_array_low + self.leaf_alloc.index_byte_offset;
     words    = self.leaf_alloc.index_byte_count >> 2;
     i = 0;
 index_copy_loop:
@@ -2121,9 +2342,7 @@ index_copy_loop:
     goto index_copy_loop;
 index_copy_done:
 
-
-    set_address_bits(self.vertex_array_high);
-    dram_src = self.vertex_array_low + self.leaf_alloc.vertex_byte_offset;
+    dram_src = self.leaf_alloc.vertex_array_low + self.leaf_alloc.vertex_byte_offset;
     words    = self.leaf_alloc.vertex_byte_count >> 2;
     i = 0;
 vertex_copy_loop:
@@ -2134,6 +2353,151 @@ vertex_copy_loop:
     i += 1;
     goto vertex_copy_loop;
 vertex_copy_done:
-
+    // uint32_t is_odd_thread = self.thread_id & 1;
+    // is_odd_thread += 32;
+    // enable_interrupts(is_odd_thread);
+    // enable_interrupts(34);
+    // enable_interrupts(35);
+    // enable_interrupts(36);
+    // uint16_t queue_ptr_address = self.local_ray_queue_head;
+    // *(queue_ptr_address) = 0;
+    // *(queue_ptr_address + 4) = 0;
+    // *(queue_ptr_address + 8) = 0;
+    // queue_ptr_address += 75;
+    // for(int i = 0; i < 16; i++) {
+    //     *(queue_ptr_address) = 0;
+    //     queue_ptr_address += 64;
+    // }
+    // *(queue_ptr_address + 1) = 0;
+    // *(queue_ptr_address + 5) = 0;
+    // *(queue_ptr_address + 9) = 0;
+    // queue_ptr_address += 76;
+    // for(int i = 0; i < 16; i++) {
+    //     *(queue_ptr_address) = 0;
+    //     queue_ptr_address += 64;
+    // }
+    // *(self.local_queue_flushing) = 0;
+    // *(self.tile_data_sram + 4) = 0;
+    // *(self.ray_send_pending_addr) = 0;
+    // relinquish_ownership(1);
+    // uint32_t ray_base = self.ray_array_base;
+    // uint32_t ray_array_index = self.thread_id << 6; // * 64 bytes per ray
+    // ray = ray_array_index + ray_base;
+    // *(ray + 63) = 0; // set ray slot to empty
+    // *(self.core_handled->previously_idle) = 0;
+    // *(self.core_handled->rays_processed) = 0;
+    // *(self.core_handled->last_observed_cycle) = 0;
+    // *(self.ray_send_pending_addr) = 0;
+    // *(local_queue_flushing) = 0;
+    // goto grab_from_tile;
     return;
+}
+
+
+// Eat_Ray_Interrupt:
+    uint32_t is_odd_thread = self.thread_id & 1;
+    is_odd_thread += 32;
+    disable_interrupts(is_odd_thread);
+    uint32_t is_value = nb_recv(is_odd_thread);
+    if (is_value == 0) {
+        enable_interrupts(is_odd_thread);
+        return;
+    }
+    uint32_t value = blocking_recv(is_odd_thread);
+    uint32_t node_id = value >> 17;
+    uint32_t core_id = value & 0x0001FFFF;
+    if(node_id != self.node_id) {
+        uint32_t value_to_send = wrong_core << 24;
+        value_to_send |= self.thread_id;
+        send_packet(value_to_send, core_id);
+        enable_interrupts(is_odd_thread);
+        return;
+    }
+    uint8_t flushing_queue = *(self.local_queue_flushing);
+    if(flushing_queue == 1){
+        goto reject_ray_interrupt;
+    }
+    uint32_t is_slot_empty = *(ray + 63);
+    if(is_slot_empty == 0) {
+        uint32_t local_queue = ray;
+        goto receive_ray_data;
+    }
+    uint32_t local_queue = self.local_queue + 8; // skip head and tail
+    is_odd_thread = self.thread_id & 1;
+    is_odd_thread *= 1036;
+    local_queue += is_odd_thread; // odd threads write to the receiver queue rather than sender queue
+    uint32_t old_count = atomic_add(&local_queue.count, 1);
+    if (old_count > 16) {
+        atomic_add(&local_queue.count, -1);
+        //reject_ray_interrupt:
+        uint32_t reject_ray_msg = reject_ray << 24;
+        reject_ray_msg |= self.thread_id;
+        send_flit(reject_ray_msg, core_id);
+        enable_interrupts(is_odd_thread);
+        return;
+    }
+    local_queue -= 4;
+    uint32_t tail_relative = atomic_add(&local_queue, 64);
+    tail_relative = tail_relative & 0x000003FF;
+    local_queue += 8;
+    local_queue += tail_relative;
+    //receive_ray_data:
+    uint32_t ray_ack_msg = ray_ack << 24 | self.thread_id;
+    send_packet(ray_ack_msg, core_id);
+    for(int i = 0; i < 16; i++) {
+        uint32_t ray_data = blocking_recv(self.thread_id);
+        *local_queue = ray_data;
+        local_queue += 4;
+    }
+    enable_interrupts(is_odd_thread);
+    return;
+
+
+#define DRAM_QUEUE_ARRAY_BEGIN 0x10000000
+
+// void dram_queue_array <- array of tuples (high and low dram queue address), size of it is the same as umber of cores (num core_id)
+
+void initialize_core(){
+
+    // disable interrupts <- ask alex if needed
+    uint32_t is_odd_thread = self.thread_id & 1;
+    is_odd_thread += 32;
+    disable_interrupts(is_odd_thread);
+    // disable_interrupts(34);
+    // disable_interrupts(35);
+    // disable_interrupts(36);
+
+
+
+
+    // index into the dram_queue_array using core_id <- grab initial high and low addresses for our queue from dram
+    uint32_t dram_queue_array_address = DRAM_QUEUE_ARRAY_BEGIN + (self.core_id * (4 *2)); // 8 bytes per tuple
+    // set high
+    uint32_t upper_addr = DRAM_QUEUE_ARRAY_BEGIN >> 16;
+    set_address_bits(upper_addr);
+    //load dram_queue info
+    uint32_t dram_queue_high = load_dram_word(dram_queue_array_address);
+    uint32_t dram_queue_low = load_dram_word(dram_queue_array_address + 4);
+
+    // save the info
+    self.dram_queue_high = dram_queue_high;
+    self.dram_queue_low = dram_queue_low;
+
+     // initialize the queue in dram by setting head and tail to 0
+    set_address_bits(dram_queue_high);
+    store_dram_word(0, dram_queue_low); // head
+    store_dram_word(0, dram_queue_low + 4); // tail
+    store_dram_word(0, dram_queue_low + 8); 
+    // enable interrupts
+    uint32_t is_odd_thread = self.thread_id & 1;
+    is_odd_thread += 32;
+    enable_interrupts(is_odd_thread);
+    // enable_interrupts(34);
+    // enable_interrupts(35);
+    // enable_interrupts(36);
+
+    // pull in the BVH nodes from DRAM into SRAM, building the tree in SRAM and setting self.root_node
+    download_bvh_tree();
+
+    return ;
 }
