@@ -1101,10 +1101,6 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     beq r15, r15, AABB_INTERSECT_RETURN, true # return r11
 
 COMPLETE_RAY: #Only register in use is r0. everything else is fair game.
-    lw r1, RAYS_COMPLETED_HIGH          # r1 = self.ray_result_addr_high
-    setmembits r1                        # set_address_bits(finished_ray_high)
-    lw r1, RAYS_COMPLETED_LOW           # r1 = self.ray_result_addr_low
-    atomadd_d r15, r1, 1               # atomic_add(finished_ray_low, 1) //THIS NEEDS TO BE COMPLETED AT THE END, NOT THE BEGINNING, TODO!!!!!!!!!
     lhu r1, r0, 54                      # r1 = ray->pix_y
     mul r1, r1, 2560                    # r1 = pix_y * 2560
     lhu r2, r0, 52                      # r2 = ray->pix_x
@@ -1149,7 +1145,7 @@ RAY_HIT_A_TRI_IN_COMPLETE: #r0 = ray, r1 = addr, r14 = 0
     sw_d r5, r1, 8                      # store_dram_word(result_addr_low + 8, tri_blue)
     sw_d r6, r1, 16                     # store_dram_word(result_addr_low + 16, tri_metallic) (note: skips offset 12 which is len_sq/tri_index union)
     lw r3, r0, 0                        # r3 = ray->ox //r3 = ox
-    lw r4, r0, 24                       # r4 = ray->inv_dx
+    lw r4, r0, 12                       # r4 = ray->inv_dx
     lw r5, 36                           # r5 = ray->t_max //r5 = tmax
     fpmul.32 r4, r4, r5                 # r4 = inv_dx * t_max... wait, this should be dx * t_max
     fpadd.32 r4, r4, r3                 # r4 = ox + dx * t_max = hit_x //r4 = hit_x
@@ -1316,6 +1312,10 @@ WAIT_FOR_SLOT_2_TO_OPEN:
     add r13, r14, 3                     # r13 = 3 (max bounce threshold + 1)
     bne r13, r11, GENERATE_BOUNCE_RAY, true  # if bounce_count != 3 goto GENERATE_BOUNCE_RAY
     sb r14, r0, 63                      # ray->active_ray = 0
+    lw r1, RAYS_COMPLETED_HIGH          # r1 = self.ray_result_addr_high
+    setmembits r1                        # set_address_bits(finished_ray_high)
+    lw r1, RAYS_COMPLETED_LOW           # r1 = self.ray_result_addr_low
+    atomadd_d r15, r1, 1               # atomic_add(finished_ray_low, 1)
     beq r15, r15, ray_done, true        # goto ray_done
 
 GENERATE_BOUNCE_RAY:
@@ -1410,7 +1410,7 @@ GENERATE_BOUNCE_RAY:
     fpadd.32 r9, r9, r11               # r9 = check = dot(bd, n)
     and r10, r10, 0                     # r10 = 0 (for comparison with 0.0)
     fplt r11, r9, r10                   # r11 = (check < 0.0)
-    bne r10, r10, SKIP_FLIP, true       # if check >= 0 skip flip (NOTE: this branch condition seems inverted, should check r11)
+    bne r11, r10, SKIP_FLIP, true       # if check >= 0 skip flip 
     # flip: bd -= 2*dot(bd,n)*n
     fpadd.32 r9, r9, r9                 # r9 = 2 * check
     fpmul.32 r10, r7, r9               # r10 = 2*check * norm_x
@@ -1481,6 +1481,10 @@ SHADOW_RAY_MUST_BE_CALCULATED:
     fpadd.32 r3, r3, r5                 # r3 = len_sq = dx^2 + dy^2 + dz^2
     sw_d r3, r1, 12                     # store_dram_word(result_addr_low + 12, len_sq)
     sb r14, r0, 63                      # ray->active_ray = 0
+    lw r1, RAYS_COMPLETED_HIGH          # r1 = self.ray_result_addr_high
+    setmembits r1                        # set_address_bits(finished_ray_high)
+    lw r1, RAYS_COMPLETED_LOW           # r1 = self.ray_result_addr_low
+    atomadd_d r15, r1, 1               # atomic_add(finished_ray_low, 1)
     beq r15, r15, ray_done, true        # goto ray_done
 
 RECIPROCAL:
