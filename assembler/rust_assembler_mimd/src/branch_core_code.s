@@ -1,5 +1,47 @@
 .org IDK //TODO
 
+
+/*
+// always do pre-order traversal
+typedef struct
+{ // 48 Bytes
+    float x_min; // 0
+    float x_max; // 4
+    float y_min; // 8
+    float y_max; // 12
+    float z_min; // 16
+    float z_max; // 20
+    uint16_t *left_child;  // 2 bytes - 0 if leaf (24)
+    uint16_t *right_child; // 2 bytes - 0 if leaf (25)
+    uint16_t *parent;      // 2 bytes (26)
+    uint16_t core_owner;   // 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner) (27)
+    uint8_t is_right;      // 1 byte (28)
+    uint8_t pad[3];        // (29)
+    uint32_t queue_low_bit_addr;  // 4 bytes - the address of the low bits of the ray queue for this node, used for sending rays to the owning core
+    uint16_t queue_high_bit_addr; // 2 bytes - the address of the high bits of the ray queue for this node, used for sending rays to the owning core
+    uint16_t prev_index;          // 2 bytes - select a different index each time for the core owner
+    uint32_t node_id;
+} AABB_Node;
+
+typedef struct
+{                                 // 64 Bytes, 16 packets
+    float ox, oy, oz;             // 12 bytes - origin (0)
+    float dx, dy, dz;             // 12 bytes - direction (12)
+    float inv_dx, inv_dy, inv_dz; // 12 bytes - precomputed 1/direction (24)
+    float t_max;                  // 4 bytes  - valid interval (36)
+    uint32_t leaf_node_starting_point; // (40)
+    uint32_t check_left;  // used for backtracking (44)
+    uint32_t check_right; // used for backtracking (48)
+    uint16_t pix_x; // (52)
+    uint16_t pix_y; // (54)
+    uint32_t tri_index; // index of the triangle hit, 0xFFFF_FFFF if no hit (56)
+    uint8_t bounce_count; // (60)
+    uint8_t light_id; // 0 for not a shadow, 1, 2, 3 for lights (61)
+    uint8_t ray_depth; // (62)
+    uint8_t active_ray; // (63)
+} Ray; // 64 Bytes, 16 packets
+*/
+
 # ***RAY is R0, NODE is R1, R15 is reserved for context info and others**
     # initialize_core();
     beq r15, r15, initialize_core, true
@@ -12,9 +54,9 @@ start_ray_traversal:
     # {
     #     goto complete_ray;
     # }
-    lw r2, r0, 44                   # r2 = ray->check_left
+    lw r2, r0, 24                   # r2 = ray->check_left
     and r4, r2, 1
-    lw r3, r0, 28                   # r3 = ray->check_right
+    lw r3, r0, 25                   # r3 = ray->check_right
     and r5, r3, 1
     and r4, r4, r5                  # r4 = (check_left & 1) & (check_right & 1)
     and r5, r5, 0
@@ -1856,12 +1898,12 @@ SWITCH_ROLES_INTERRUPT:
     intena r6                               # enable_interrupts(channel) (nothing to do)
     bne r14, r14, r4, true                             # return
 CONTINUE_WITH_SWITCH_ROLES_INTERRUPT:
-    block r7                                # r7 = blocking_recv(channel) (full flit value)
+    block r7                                # switch_core_request = r7 = blocking_recv(channel) (full flit value)
     # if (self.core_handled->previously_idle == 0)
     lw r9, PREVIOUSLY_IDLE                  # r9 = self.previously_idle
     bne r9, r14, UNHANDLED_CORE, false # if previously_idle == 0 goto SWITCH_ROLES_INTERRUPT_DONE
     #     send_flit(REJECT_CHANGE << 24, switch_core_request >> 4, switch_core_request & 0xF + 16);
-    lw r10, SWITCH_CORE_REQUEST             # r10 = switch_core_request
+    add r10, r7, 0                      # r10 = switch_core_request
     add r11, r14, 14                    # r11 = REJECT_CHANGE = 14
     sll r11, r11, 24                     # r11 = REJECT_CHANGE << 24
     and r12, r10, 0xF                   # r12 = thread_id = switch_core_request & 0xF
@@ -1876,7 +1918,7 @@ CONTINUE_WITH_SWITCH_ROLES_INTERRUPT:
     bne r14, r14, r4, true                             # return
 UNHANDLED_CORE:
     # send_flit(ACCEPT_CHANGE << 24 | self.is_branch_core, switch_core_request >> 4, switch_core_request & 0xF + 16);
-    lw r10, SWITCH_CORE_REQUEST             # r10 = switch_core_request
+    add r10, r7, 0                      # r10 = switch_core_request
     add r11, r14, 13                    # r11 = ACCEPT_CHANGE = 13
     sll r11, r11, 24                     # r11 = ACCEPT_CHANGE << 24
     and r12, r10, 0xF                   # r12 = thread_id = switch_core_request & 0xF
@@ -1885,7 +1927,7 @@ UNHANDLED_CORE:
     sll r10, r10, 2                     # r10 = core_id high nibble shifted to channel position
     or r10, r10, r12                    # r10 = destination flit
     sendflit r11, r10                   # send_flit(ACCEPT_CHANGE << 24 | self.is_branch_core, dest) (accept: target core idle)
-    # get_ownership();                  # TODO ALex tf is this?
+    getowner                  # TODO ALex tf is this?
     # uint32_t type_of_core = blocking_recv(0);
     block r10, r14                           # r10 = type_of_core = blocking_recv(0)
     # if (type_of_core != self.is_branch_core)

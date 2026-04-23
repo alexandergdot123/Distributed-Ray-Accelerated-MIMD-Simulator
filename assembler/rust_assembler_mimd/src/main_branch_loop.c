@@ -1,4 +1,45 @@
 // always do pre-order traversal
+/*
+// always do pre-order traversal
+typedef struct
+{ // 48 Bytes
+    float x_min; // 0
+    float x_max; // 4
+    float y_min; // 8
+    float y_max; // 12
+    float z_min; // 16
+    float z_max; // 20
+    uint16_t *left_child;  // 2 bytes - 0 if leaf (24)
+    uint16_t *right_child; // 2 bytes - 0 if leaf (25)
+    uint16_t *parent;      // 2 bytes (26)
+    uint16_t core_owner;   // 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner) (27)
+    uint8_t is_right;      // 1 byte (28)
+    uint8_t pad[3];        // (29)
+    uint32_t queue_low_bit_addr;  // 4 bytes - the address of the low bits of the ray queue for this node, used for sending rays to the owning core
+    uint16_t queue_high_bit_addr; // 2 bytes - the address of the high bits of the ray queue for this node, used for sending rays to the owning core
+    uint16_t prev_index;          // 2 bytes - select a different index each time for the core owner
+    uint32_t node_id;
+} AABB_Node;
+
+typedef struct
+{                                 // 64 Bytes, 16 packets
+    float ox, oy, oz;             // 12 bytes - origin (0)
+    float dx, dy, dz;             // 12 bytes - direction (12)
+    float inv_dx, inv_dy, inv_dz; // 12 bytes - precomputed 1/direction (24)
+    float t_max;                  // 4 bytes  - valid interval (36)
+    uint32_t leaf_node_starting_point; // (40)
+    uint32_t check_left;  // used for backtracking (44)
+    uint32_t check_right; // used for backtracking (48)
+    uint16_t pix_x; // (52)
+    uint16_t pix_y; // (54)
+    uint32_t tri_index; // index of the triangle hit, 0xFFFF_FFFF if no hit (56)
+    uint8_t bounce_count; // (60)
+    uint8_t light_id; // 0 for not a shadow, 1, 2, 3 for lights (61)
+    uint8_t ray_depth; // (62)
+    uint8_t active_ray; // (63)
+} Ray; // 64 Bytes, 16 packets
+*/
+
 typedef struct
 { // 48 Bytes
     float x_min; // 0
