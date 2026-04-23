@@ -1941,10 +1941,316 @@ FOR_SIZE_OF_GEO:
     beq r10, r11, VERTEX_COPY_DONE, true # if type_of_core == 1 (branch core) goto SWITCH_ROLES_INTERRUPT_DONE
     beq r15, r15, VERTEX_COPY_DONE_BUT_LEAF, true
 
+download_bvh_tree:
+    # NOTE:
+    # The current C snippet has two real problems:
+    #   1) the root push in the C is inconsistent with the stack growth direction
+    #   2) the recurse logic has an unconditional goto that makes the owner checks bogus
+    # This assembly follows the intended behavior, not those broken lines literally.
+
+    and r14, r14, 0                          # r14 = 0
+
+    # *(self.sram_alloc_count) = self.node_array_top;
+    lw r11, NODE_ARRAY_TOP
+    sw r11, SRAM_ALLOC_COUNT
+
+    # set_address_bits(self.node_array_high);
+    lw r12, NODE_ARRAY_HIGH
+    setmembits r11, r12                      # r11 = old membits (ignored), membits = node_array_high
+
+    # stack_top = DFS_STACK;
+    add r2, r14, DFS_STACK                   # r2 = stack_top
+
+    # -- push root onto stack --
+    sw r14, r2, 0                            # dram_idx = 0
+    add r11, r14, 0xFFFF
+    sh r11, r2, 4                            # parent_ptr = 0xFFFF (null sentinel)
+    sh r14, r2, 6                            # patch_left = 0
+    sh r14, r2, 8                            # patch_right = 0
+    sh r14, r2, 10                           # is_right = 0
+    sw r14, r2, 12                           # depth = 0
+    add r2, r2, 16                           # stack_top++
+
+    # leaf_node_table_ptr = self.leaf_core_lookup_table;
+    add r3, r14, LEAF_CORE_LOOKUP_TABLE      # r3 = leaf_node_table_ptr
+
+dfs_loop:
+    # if (stack_top == DFS_STACK) goto dfs_done;
+    add r11, r14, DFS_STACK
+    beq r2, r11, dfs_done, true
+
+    add r2, r2, -16
+    lw r4, r2, 0                             # dram_idx
+    lhu r5, r2, 4                            # parent_ptr
+    lhu r6, r2, 6                            # patch_left
+    lhu r7, r2, 8                            # patch_right
+    lhu r8, r2, 10                           # is_right
+    lw r9, r2, 12                            # depth
+
+    lw r10, SRAM_NODE_ALLOC_PTR              # address of alloc pointer / next free slot
+    atomadd r13, r10, 48                     # r13 = node = atomic_add(sram_slot_address, 48)
+
+    lw r12, NODE_ARRAY_LOW                   # r12 = bottom_node_bits base
+    sll r11, r4, 4                           # r11 = dram_idx * 16
+    sll r10, r4, 5                           # r10 = dram_idx * 32
+    add r12, r12, r11
+    add r12, r12, r10                        # r12 = bottom_node_bits + dram_idx * 48
+
+    # -- copy bounding box --
+    lw_d r10, r12, 0
+    sw r10, r13, 0
+    lw_d r10, r12, 4
+    sw r10, r13, 4
+    lw_d r10, r12, 8
+    sw r10, r13, 8
+    lw_d r10, r12, 12
+    sw r10, r13, 12
+    lw_d r10, r12, 16
+    sw r10, r13, 16
+    lw_d r10, r12, 20
+    sw r10, r13, 20
+
+    # -- copy metadata --
+    lhu_d r10, r12, 30
+    sh r10, r13, 30                          # core_owner
+    lhu_d r10, r12, 40
+    sh r10, r13, 40                          # queue_high_bit_addr
+    lw_d r10, r12, 36
+    sw r10, r13, 36                          # queue_low_bit_addr
+    lw_d r10, r12, 44
+    sw r10, r13, 44                          # node_id
+
+    add r11, r14, 0xFFFF
+    sh r11, r13, 42                          # prev_index = 0xFFFF
+    sb r8, r13, 32                           # is_right = is_right (byte field)
+
+    # -- set parent pointer --
+    sh r5, r13, 28                           # node->parent = parent_ptr
+
+    # -- default children to null --
+    sh r11, r13, 24                          # left_child = 0xFFFF
+    sh r11, r13, 26                          # right_child = 0xFFFF
+
+    # core_id = self.thread_id >> 4
+    srl r11, r15, 4
+
+    # if (core_owner != 0xFFFF && core_owner != self.core_id) leaf_node_table_ptr[0] = node;
+    lhu r10, r13, 30                         # r10 = core_owner
+    beq r10, r11, SKIP_LEAF_TABLE_INSERT, true
+    add r12, r14, 0xFFFF
+    beq r10, r12, SKIP_LEAF_TABLE_INSERT, true
+    sh r13, r3, 0
+    add r3, r3, 2
+SKIP_LEAF_TABLE_INSERT:
+
+    # if (parent_ptr != 0xFFFF) patch parent child pointer
+    add r12, r14, 0xFFFF
+    beq r5, r12, SKIP_PATCH, true
+    add r12, r14, 1
+    beq r8, r12, PATCH_RIGHT_CHILD, true
+    sh r13, r6, 0                            # *patch_left = node
+    beq r15, r15, SKIP_PATCH, true
+PATCH_RIGHT_CHILD:
+    sh r13, r7, 0                            # *patch_right = node
+SKIP_PATCH:
+
+    # if (owner == self->core_id) self->root_node = node;
+    lhu r10, r13, 30                         # owner = dram_node->core_owner
+    bne r10, r11, CHECK_RECURSE, true
+    sw r13, ROOT_NODE_ID
+CHECK_RECURSE:
+
+    # recurse if owner == 0xFFFF || owner == self->core_id
+    add r12, r14, 0xFFFF
+    beq r10, r12, DO_RECURSE, true
+    beq r10, r11, DO_RECURSE, true
+    beq r15, r15, dfs_loop, true             # foreign owner: stop here
+
+DO_RECURSE:
+    # -- push right child first (so left is processed first) --
+    lw_d r10, r12, 24                        # right_idx
+    lw_d r11, r12, 28                        # left_idx
+
+    add r12, r9, 1                           # child_depth = depth + 1
+
+    sw r10, r2, 0                            # right_idx
+    sh r13, r2, 4                            # parent = node
+    add r10, r13, 24
+    sh r10, r2, 6                            # patch_left = &node->left_child
+    add r10, r13, 26
+    sh r10, r2, 8                            # patch_right = &node->right_child
+    add r10, r14, 1
+    sh r10, r2, 10                           # is_right = 1
+    sw r12, r2, 12                           # depth + 1
+    add r2, r2, 16
+
+    # -- push left child --
+    sw r11, r2, 0                            # left_idx
+    sh r13, r2, 4
+    add r10, r13, 24
+    sh r10, r2, 6
+    add r10, r13, 26
+    sh r10, r2, 8
+    sh r14, r2, 10                           # is_right = 0
+    sw r12, r2, 12
+    add r2, r2, 16
+
+    beq r15, r15, dfs_loop, true
+
+dfs_done:
+    # *(self.leaf_core_lookup_table + 256) = self->root_node;
+    lw r10, ROOT_NODE_ID
+    add r11, r14, LEAF_CORE_LOOKUP_TABLE
+    add r11, r11, 256
+    sh r10, r11, 0
+
+    # set_address_bits(self.node_array_high);
+    lw r12, NODE_ARRAY_HIGH
+    setmembits r13, r12
+
+    # dram_src = self.leaf_alloc.vertex_array_low + self.leaf_alloc.index_byte_offset;
+    lw r1, LEAF_ALLOC_VERTEX_ARRAY_LOW
+    lw r2, LEAF_ALLOC_INDEX_BYTE_OFFSET
+    add r1, r1, r2              # r1 = dram_src
+
+    # words = self.leaf_alloc.index_byte_count >> 2;
+    lw r3, LEAF_ALLOC_INDEX_BYTE_COUNT
+    srl r3, r3, 2               # r3 = words
+
+    add r4, r14, 0              # i = 0
+
+index_copy_loop:
+    bge r4, r3, index_copy_done, true
+
+    lw_d r5, r1, 0
+    sw r5, r6, 0                # *(sram_dst) = ...
+    
+    add r1, r1, 4               # dram_src += 4
+    add r6, r6, 4               # sram_dst += 4
+    add r4, r4, 1               # i++
+
+    beq r15, r15, index_copy_loop, true
+
+index_copy_done:
+
+    # dram_src = self.leaf_alloc.vertex_array_low + self.leaf_alloc.vertex_byte_offset;
+    lw r1, LEAF_ALLOC_VERTEX_ARRAY_LOW
+    lw r2, LEAF_ALLOC_VERTEX_BYTE_OFFSET
+    add r1, r1, r2
+
+    # words = self.leaf_alloc.vertex_byte_count >> 2;
+    lw r3, LEAF_ALLOC_VERTEX_BYTE_COUNT
+    srl r3, r3, 2
+
+    add r4, r14, 0              # i = 0
+
+vertex_copy_loop:
+    bge r4, r3, vertex_copy_done, true
+
+    lw_d r5, r1, 0
+    sw r5, r6, 0
+
+    add r1, r1, 4
+    add r6, r6, 4
+    add r4, r4, 1
+
+    beq r15, r15, vertex_copy_loop, true
+
+vertex_copy_done:
+
+    # uint32_t is_odd_thread = self.thread_id & 1;
+    and r10, r15, 1
+    add r10, r10, 32
+    intena r10
+
+    intena 34
+    intena 35
+    intena 36
+
+    # queue_ptr_address = self.local_ray_queue_head;
+    lw r1, LOCAL_RAY_QUEUE_HEAD
+
+    sw r14, r1, 0
+    sw r14, r1, 4
+    sw r14, r1, 8
+
+    add r1, r1, 75
+
+    add r2, r14, 16
+queue_loop_1:
+    beq r2, r14, queue_loop_1_done, true
+    sw r14, r1, 0
+    add r1, r1, 64
+    add r2, r2, -1
+    beq r15, r15, queue_loop_1, true
+
+queue_loop_1_done:
+
+    sb r14, r1, 1
+    sb r14, r1, 5
+    sb r14, r1, 9
+
+    add r1, r1, 76
+
+    add r2, r14, 16
+queue_loop_2:
+    beq r2, r14, queue_loop_2_done, true
+    sw r14, r1, 0
+    add r1, r1, 64
+    add r2, r2, -1
+    beq r15, r15, queue_loop_2, true
+
+queue_loop_2_done:
+
+    # *(self.local_queue_flushing) = 0;
+    sw r14, LOCAL_QUEUE_FLUSHING
+
+    # *(self.tile_data_sram + 4) = 0;
+    lw r1, TILE_DATA_SRAM
+    sw r14, r1, 4
+
+    # *(self.ray_send_pending_addr) = 0;
+    sw r14, RAY_SEND_PENDING_ADDR
+
+    relinquish 1
+
+    # ray_base = self.ray_array_base;
+    lw r1, RAY_ARRAY_BASE
+
+    # ray_array_index = self.thread_id << 6;
+    sll r2, r15, 6
+
+    # ray = ray_base + index
+    add r1, r1, r2
+
+    # *(ray + 63) = 0;
+    sb r14, r1, 63
+
+    # *(self.core_handled->previously_idle) = 0;
+    sw r14, PREVIOUSLY_IDLE
+
+    # *(self.core_handled->rays_processed) = 0;
+    sw r14, RAYS_PROCESSED
+
+    # *(self.core_handled->last_observed_cycle) = 0;
+    sw r14, LAST_OBSERVED_CYCLE
+
+    # *(self.ray_send_pending_addr) = 0;
+    sw r14, RAY_SEND_PENDING_ADDR
+
+    # *(local_queue_flushing) = 0;
+    sw r14, LOCAL_QUEUE_FLUSHING
+
+    beq r15, r15, grab_from_tile, true
+
+    return
 
 
 
-
+SRAM_ALLOC_COUNT:       .data 0
+SRAM_NODE_ALLOC_PTR:     .data 0
+NODE_ARRAY_TOP:         .data 0
+ROOT_NODE_ID:           .data 0
 BRANCH_START_OF_CODE:    .data -1
 BRANCH_NUM_INSTRUCTION_BYTES: .data -1
 BRANCH_START_OF_GEO:     .data -1

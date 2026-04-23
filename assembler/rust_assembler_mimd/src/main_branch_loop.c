@@ -2112,8 +2112,8 @@ check_recurse:
     // recurse if: owner == 0xFFFF OR owner == self->core_id
     if (owner == all_ones)
     {
+        goto do_recurse;
     }
-    goto do_recurse;
     if (owner == self->core_id)
     {
         self.node_id = node_id;
