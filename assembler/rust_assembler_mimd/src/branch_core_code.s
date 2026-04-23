@@ -1,47 +1,5 @@
 .org IDK //TODO
 
-
-/*
-// always do pre-order traversal
-typedef struct
-{ // 48 Bytes
-    float x_min; // 0
-    float x_max; // 4
-    float y_min; // 8
-    float y_max; // 12
-    float z_min; // 16
-    float z_max; // 20
-    uint16_t *left_child;  // 2 bytes - 0 if leaf (24)
-    uint16_t *right_child; // 2 bytes - 0 if leaf (25)
-    uint16_t *parent;      // 2 bytes (26)
-    uint16_t core_owner;   // 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner) (27)
-    uint8_t is_right;      // 1 byte (28)
-    uint8_t pad[3];        // (29)
-    uint32_t queue_low_bit_addr;  // 4 bytes - the address of the low bits of the ray queue for this node, used for sending rays to the owning core
-    uint16_t queue_high_bit_addr; // 2 bytes - the address of the high bits of the ray queue for this node, used for sending rays to the owning core
-    uint16_t prev_index;          // 2 bytes - select a different index each time for the core owner
-    uint32_t node_id;
-} AABB_Node;
-
-typedef struct
-{                                 // 64 Bytes, 16 packets
-    float ox, oy, oz;             // 12 bytes - origin (0)
-    float dx, dy, dz;             // 12 bytes - direction (12)
-    float inv_dx, inv_dy, inv_dz; // 12 bytes - precomputed 1/direction (24)
-    float t_max;                  // 4 bytes  - valid interval (36)
-    uint32_t leaf_node_starting_point; // (40)
-    uint32_t check_left;  // used for backtracking (44)
-    uint32_t check_right; // used for backtracking (48)
-    uint16_t pix_x; // (52)
-    uint16_t pix_y; // (54)
-    uint32_t tri_index; // index of the triangle hit, 0xFFFF_FFFF if no hit (56)
-    uint8_t bounce_count; // (60)
-    uint8_t light_id; // 0 for not a shadow, 1, 2, 3 for lights (61)
-    uint8_t ray_depth; // (62)
-    uint8_t active_ray; // (63)
-} Ray; // 64 Bytes, 16 packets
-*/
-
 # ***RAY is R0, NODE is R1, R15 is reserved for context info and others**
     # initialize_core();
     beq r15, r15, initialize_core, true
@@ -56,7 +14,7 @@ start_ray_traversal:
     # }
     lw r2, r0, 24                   # r2 = ray->check_left
     and r4, r2, 1
-    lw r3, r0, 25                   # r3 = ray->check_right
+    lw r3, r0, 26                   # r3 = ray->check_right
     and r5, r3, 1
     and r4, r4, r5                  # r4 = (check_left & 1) & (check_right & 1)
     and r5, r5, 0
@@ -86,7 +44,7 @@ LEFT_BITFIELD_DONE:
     add r9, r9, 1
     sll r9, r9, r5                  # r9 = 1 << ray->ray_depth
     and r9, r9, r3                  # r9 = ray->check_right & (1 << ray->ray_depth)
-    lhu r6, r1, 25                  # r6 = node->right_child (uint16 at offset 25)
+    lhu r6, r1, 26                  # r6 = node->right_child (uint16 at offset 25)
     beq r6, r7, RIGHT_CHILD_NULL, true
     and r6, r6, 0
     beq r15, r15, RIGHT_BITFIELD_DONE, true
@@ -106,7 +64,7 @@ RIGHT_BITFIELD_DONE:
 
     # TODO ASK ALEX ABOUT THIS
     # uint32_t bitfield = *(ray.check_left + node->is_right * 4);
-    lbu r6, r1, 28                  # r6 = node->is_right
+    lbu r6, r1, 32                  # r6 = node->is_right
     sll r6, r6, 2                   # r6 = node->is_right * 4
     add r6, r0, r6                  # r6 = &ray.check_left + is_right*4
     add r6, r6, 18                  # r6 = absolute address of bitfield word in ray
@@ -130,7 +88,7 @@ RIGHT_BITFIELD_DONE:
     sb r5, r0, 62
 
     # if (node->parent == 0) goto complete_ray;
-    lhu r6, r1, 26                  # r6 = node->parent
+    lhu r6, r1, 28                  # r6 = node->parent
     beq r6, r7, complete_ray, true  # r7 = 0
 
     # node = node->parent;
@@ -146,25 +104,25 @@ CHECK_BOTH_ZERO:
 DO_AABB:
     # int hit = AABB_Intersect(node, ray);
     # TODO ask alex abt function call protocl\ol
-    beq r15, r15, AABB_INTERSECT, true 
+    jmp r8, AABB_INTERSECT 
 AABB_INTERSECT_RETURN:             
     # ASSUME r11 CONTAINS INFO FROM FUNCTION
     # if (hit)
     beq r11, r7, AABB_MISS, true
 
-    # if (node->tri_count == 0)
-    lbu r6, r1, 30                  # TODO confirm offset
+    # if (node->tri_count == 0) <- ASSUME RAY -> TRI_INDEX
+    lbu r6, r0, 56                  # TODO confirm offset
     beq r6, r7, IS_INTERNAL_NODE, true
     beq r15, r15, IS_LEAF_NODE, true
 
 IS_INTERNAL_NODE:
     # ray->ray_depth++
-    lbu r5, r0, 59
+    lbu r5, r0, 62
     add r5, r5, 1
-    sb r5, r0, 59
+    sb r5, r0, 62
 
     # if (node->core_owner != 0xFFFF)
-    lhu r6, r1, 32                  # r6 = node->core_owner (uint16 offset 32) TODO confirm offset
+    lhu r6, r1, 27                  # r6 = node->core_owner (uint16 offset 32) TODO confirm offset
     and r7, r7, 0
     add r7, r7, 0xFFFF
     beq r6, r7, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
@@ -186,13 +144,13 @@ IS_INTERNAL_NODE:
     intdis r11          
 
     # uint32_t request_word = (node->node_id << 17) | self.thread_id;
-    lw r12, r1, 40                  # r12 = node->node_id TODO confirm offset
+    lw r12, r1, 44                  # r12 = node->node_id TODO confirm offset
     sll r12, r12, 17
     and r10, r15, 0xF               # r10 = thread_id
     or r12, r12, r10                # r12 = request_word
 
     # send_packet(request_word, node->core_owner, 32);
-    lhu r6, r1, 32                  # r6 = node->core_owner
+    lhu r6, r1, 27                  # r6 = node->core_owner
     sendflit r6, r12, 32            # TODO confirm notation w/ Alex
 
 # uint32_t sent = 0;
@@ -1934,10 +1892,20 @@ UNHANDLED_CORE:
     lw r11, IS_BRANCH_CORE             # r11 = self.is_branch_core
     beq r10, r11, CORE_TYPE_BRANCH, false # if type_of_core != self.is_branch_core goto SWITCH_ROLES_INTERRUPT_DONE
     #     uint32_t starting_address = (type_of_core == 1) ? branch_start_of_code : leaf_start_of_code;
+<<<<<<< HEAD
     add r11, r14, 1
     beq r10, r11, leaf_start_of_code
     lw r11, LEAF_START_OF_CODE             # r11 = leaf_start_of_code
     bew r15, r15, DONE_LOADING_CODE, true
+=======
+    and r11, r11, 0
+    add r11, r11, 1
+    beq r10, r11, BRANCH_START_OF_CODE
+    lw r11, leaf_start_of_code             # r11 = leaf_start_of_code    
+    beq r15, r15, DONE_LOADING_CODE, true
+BRANCH_START_OF_CODE:
+
+>>>>>>> 9d4613b (fixed branch)
     lw, r11, branch_start_of_code   
     # r11 = starting_address
 DONE_LOADING_CODE:
