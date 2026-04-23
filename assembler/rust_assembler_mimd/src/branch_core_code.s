@@ -1889,13 +1889,11 @@ TRANSFER_BRANCH_GEO_LOOP:
 
 SWITCH_ROLES_INTERRUPT:
     add r4, r8, 0                           # r4 = return address (saved from r8 by caller convention)
-    and r6, r6, 0                          # r6 = self thread_id & 1 (is_odd_thread)
-    add r6, r6, 34                          # r6 = interrupt channel = 32 + is_odd_thread
-    intdis r6                               # disable_interrupts(34)
+    intdis 34                               # disable_interrupts(34)
     nonblock r7                             # is_value = r7 = nb_recv(channel) (0 if no message waiting)
     and r14, r14, 0                         # r14 = 0 (zero register)
     bne r14, r7, CONTINUE_WITH_SWITCH_ROLES_INTERRUPT, true  # if message waiting goto CONTINUE_WITH_SWITCH_ROLES_INTERRUPT
-    intena r6                               # enable_interrupts(channel) (nothing to do)
+    intena 34                               # enable_interrupts(channel) (nothing to do)
     bne r14, r14, r4, true                             # return
 CONTINUE_WITH_SWITCH_ROLES_INTERRUPT:
     block r7                                # switch_core_request = r7 = blocking_recv(channel) (full flit value)
@@ -1908,34 +1906,35 @@ CONTINUE_WITH_SWITCH_ROLES_INTERRUPT:
     sll r11, r11, 24                     # r11 = REJECT_CHANGE << 24
     and r12, r10, 0xF                   # r12 = thread_id = switch_core_request & 0xF
     add r12, r12, 16                     # r12 = thread_id + 16 (send channel)
-    and r10, r10, 0xF0                  # r10 = core_id high nibble
-    sll r10, r10, 2                     # r10 = core_id high nibble shifted to channel position
+    and r10, r10, 0xFFF0                  # r10 = core_id high nibble
+    sll r10, r10, 8                     # r10 = core_id high nibble shifted to channel position
+    srl r10, r10, 6
     or r10, r10, r12                    # r10 = destination flit
     sendflit r11, r10                   # send_flit(REJECT_CHANGE << 24, dest) (reject: target core not idle)
     # enable_interrupts(34);
     # return;
-    intena r6                               # enable_interrupts(channel)
-    bne r14, r14, r4, true                             # return
+    intena 34                               # enable_interrupts(channel)
+    jmp r15, r4                             # return
 UNHANDLED_CORE:
     # send_flit(ACCEPT_CHANGE << 24 | self.is_branch_core, switch_core_request >> 4, switch_core_request & 0xF + 16);
+    getowner                  # TODO ALex tf is this? Hi Sai this is alex it turns off all other threads
     add r10, r7, 0                      # r10 = switch_core_request
     add r11, r14, 13                    # r11 = ACCEPT_CHANGE = 13
     sll r11, r11, 24                     # r11 = ACCEPT_CHANGE << 24
     and r12, r10, 0xF                   # r12 = thread_id = switch_core_request & 0xF
     add r12, r12, 16                     # r12 = thread_id + 16 (send channel)
-    and r10, r10, 0xF0                  # r10 = core_id high nibble
-    sll r10, r10, 2                     # r10 = core_id high nibble shifted to channel position
+    and r10, r10, 0xFFF0                  # r10 = core_id high nibble
+    sll r10, r10, 8                     # r10 = core_id high nibble shifted to channel position
+    srl r10, r10, 6
     or r10, r10, r12                    # r10 = destination flit
     sendflit r11, r10                   # send_flit(ACCEPT_CHANGE << 24 | self.is_branch_core, dest) (accept: target core idle)
-    getowner                  # TODO ALex tf is this?
     # uint32_t type_of_core = blocking_recv(0);
     block r10, r14                           # r10 = type_of_core = blocking_recv(0)
     # if (type_of_core != self.is_branch_core)
     lw r11, IS_BRANCH_CORE             # r11 = self.is_branch_core
     beq r10, r11, CORE_TYPE_BRANCH, false # if type_of_core != self.is_branch_core goto SWITCH_ROLES_INTERRUPT_DONE
     #     uint32_t starting_address = (type_of_core == 1) ? branch_start_of_code : leaf_start_of_code;
-    and r11, r11, 0
-    add r11, r11, 1
+    add r11, r14, 1
     beq r10, r11, leaf_start_of_code
     lw r11, LEAF_START_OF_CODE             # r11 = leaf_start_of_code
     bew r15, r15, DONE_LOADING_CODE, true
