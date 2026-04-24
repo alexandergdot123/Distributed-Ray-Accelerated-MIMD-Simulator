@@ -2154,7 +2154,6 @@ dfs_done:
 
     add r4, r14, 0              # i = 0
     lw r6, SRAM_NODE_ALLOC_PTR         # r6 = sram_dst (start of tile data in SRAM)
-    sw r6, INDEX_ARRAY_BASE
 index_copy_loop:
     blte r3, r4, index_copy_done, true
 
@@ -2176,9 +2175,10 @@ index_copy_done:
 
 
     # dram_src = self.leaf_alloc.vertex_array_low + self.leaf_alloc.vertex_byte_offset;
-    lw r2, 24
-    lw r3, 28
-    lw r1, 4
+    lw r2, r1, 24
+    sw r2, VERTEX_ARRAY_BASE
+    lw r3, r1, 28
+    lw r1, r1, 4
     add r1, r1, r2
 
     # words = self.leaf_alloc.vertex_byte_count >> 2;
@@ -2286,7 +2286,7 @@ queue_loop_2_done:
     return
 
 
-INDEX_ARRAY_BASE:       .data 0
+VERTEX_ARRAY_BASE:       .data 0
 SRAM_ALLOC_COUNT:       .data 0
 SRAM_NODE_ALLOC_PTR:     .data 0
 NODE_ARRAY_TOP:         .data 0

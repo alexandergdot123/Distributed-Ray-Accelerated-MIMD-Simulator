@@ -5,22 +5,15 @@
 triangle_intersect:
     #void Triangle_Intersect(Triangle *tri, Ray *ray, Vertex *vertices)
     # tri in r14, ray is in r0, verticies needs to be found
-    and r13, r13, 0
-    add, r13, r13, 16924
-    sll r13, r13, 1 
-    lw, r12, RAY_QUEUE_LOW      
-    add r13, r13, r12                       # r13 = base of leaf_geo_alloc_info
-    lw r12, r13, 20                         # r12 = index_byte_count
-    lw r13, INDEX_ARRAY_BASE
-    add r13, r13, r12                       # r13 = Vertex * vertices
+    lw r13, VERTEX_ARRAY_BASE                   # r13 = Vertex * vertices
 
 
-    
+
     
 
 
 
-INDEX_ARRAY_BASE:       .data 0
+VERTEX_ARRAY_BASE:       .data 0
 SRAM_ALLOC_COUNT:       .data 0
 SRAM_NODE_ALLOC_PTR:     .data 0
 NODE_ARRAY_TOP:         .data 0
