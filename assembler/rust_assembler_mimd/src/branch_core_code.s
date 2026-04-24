@@ -12,14 +12,13 @@ start_ray_traversal:
     # {
     #     goto complete_ray;
     # }
-    lw r2, r0, 24                   # r2 = ray->check_left
+    lw r2, r0, 44                   # r2 = ray->check_left
     and r4, r2, 1
-    lw r3, r0, 26                   # r3 = ray->check_right
+    lw r3, r0, 48                   # r3 = ray->check_right
     and r5, r3, 1
     and r4, r4, r5                  # r4 = (check_left & 1) & (check_right & 1)
     and r5, r5, 0
-    add r5, r5, 1                   # r5 = 1
-    beq r4, r5, complete_ray, true  # if both bits set goto complete_ray
+    bne r4, r5, complete_ray, true  # if both bits set goto complete_ray
 
     # uint32_t left_bitfield_check = ray->check_left & (1 << ray->ray_depth) | node->left_child == 0;
     lbu r5, r0, 62                  # r5 = ray->ray_depth
@@ -67,8 +66,7 @@ RIGHT_BITFIELD_DONE:
     lbu r6, r1, 32                  # r6 = node->is_right
     sll r6, r6, 2                   # r6 = node->is_right * 4
     add r6, r0, r6                  # r6 = &ray.check_left + is_right*4
-    add r6, r6, 18                  # r6 = absolute address of bitfield word in ray
-    lw r8, r6, 0                    # r8 = bitfield
+    lw r8, r6, 44                    # r8 = bitfield
 
 
     # uint32_t or_value = 1 << (ray->ray_depth - 1);
@@ -2056,12 +2054,13 @@ dfs_loop:
     # if (core_owner != 0xFFFF && core_owner != self.core_id) leaf_node_table_ptr[0] = node;
     lhu r10, r13, 30                         # r10 = core_owner
     beq r10, r11, SKIP_LEAF_TABLE_INSERT, true
-    add r12, r14, 0xFFFF
-    beq r10, r12, SKIP_LEAF_TABLE_INSERT, true
+    add r14, r14, 0xFFFF
+    beq r10, r14, SKIP_LEAF_TABLE_INSERT, true
+    and r14, r14, 0
     sh r13, r3, 0
     add r3, r3, 2
 SKIP_LEAF_TABLE_INSERT:
-
+    and r14, r14, 0
     # if (parent_ptr != 0xFFFF) patch parent child pointer
     add r12, r14, 0xFFFF
     beq r5, r12, SKIP_PATCH, true
@@ -2139,7 +2138,7 @@ dfs_done:
     add r4, r14, 0              # i = 0
     lw r6, SRAM_NODE_ALLOC_PTR         # r6 = sram_dst (start of tile data in SRAM)
 index_copy_loop:
-    bge r4, r3, index_copy_done, true
+    blte r3, r4, index_copy_done, true
 
     lw_d r5, r1, 0
     sw r5, r6, 0                # *(sram_dst) = ...
@@ -2164,7 +2163,7 @@ index_copy_done:
     add r4, r14, 0              # i = 0
 
 vertex_copy_loop:
-    bge r4, r3, vertex_copy_done, true
+    blte r3, r4, vertex_copy_done, true
 
     lw_d r5, r1, 0
     sw r5, r6, 0
@@ -2178,10 +2177,8 @@ vertex_copy_loop:
 vertex_copy_done:
 
     # uint32_t is_odd_thread = self.thread_id & 1;
-    and r10, r15, 1
-    add r10, r10, 32
-    intena r10
-
+    intena 32
+    intena 33
     intena 34
     intena 35
     intena 36
