@@ -49,6 +49,7 @@ fn opcode_table() -> HashMap<&'static str, u32> {
         ("intena", 38),
         ("intdis", 55),
         ("setmembits", 39),
+        ("switchctx", 56)
 
         ("lb_d", 40), ("lbu_d", 41), ("lh_d", 42), ("lhu_d", 43),
         ("lw_d", 44), ("sw_d", 45), ("sh_d", 46), ("sb_d", 47),
@@ -333,6 +334,10 @@ fn assemble_instruction(
                 set_imm(&mut instr, parse_imm_or_label(args[2]));
                 set_imm1(&mut instr, 1);
             }
+            return vec![instr];
+        }
+        56 => {
+            if args.len() != 0 { panic!("switchctx expects no args"); }
             return vec![instr];
         }
         _ => {}

@@ -387,6 +387,7 @@ pub enum Operation {
     EnableInterrupts,
     DisableInterrupts,
     SetMemoryBits,
+    SwitchCtx,
 
     ReadSignedByteDram,
     ReadUnsignedByteDram,
@@ -656,7 +657,7 @@ fn num_source_registers(instr: &DecodedInstruction) -> u8 {
         FPMac => 2,
         FPStoreAccumulator | GetLowClock => 0,
         BranchEq | BranchNe | BranchLTE | BranchGT | BranchGTU | BranchLTEU => 2,
-        BlockVal => 0,
+        BlockVal | SwitchCtx => 0,
 
         ReadSignedByteDram | ReadUnsignedByteDram | ReadSignedHalfDram | ReadUnsignedHalfDram
         | ReadWordDram => 1,
@@ -2939,6 +2940,10 @@ impl Core {
                     }
                     Operation::GetLowClock => {
                         self.register_file[self.context_in_progress * REGS_PER_CONTEXT + instruction_to_execute.dr] = self.cycle as u32;
+                        self.pc[self.context_in_progress] += 4;
+                    },
+                    Operation::SwitchCtx => {
+                        switch_ctx = true;
                         self.pc[self.context_in_progress] += 4;
                     },
                 }

@@ -369,7 +369,7 @@ CHECK_INTERRUPT_MAILBOX:
     mul r9, r9, r11                 # r9 = odd_thread * 1036
     add r8, r8, r9                  # r8 = &local_queue for this thread parity
     atomadd r9, r8, 1               # r9 = old_count
-    lbu r11, LOCAL_QUEUE_FLUSHING   # r11 = flushing flag
+    lw r11, LOCAL_QUEUE_FLUSHING   # r11 = flushing flag
     and r14, r14, 0
     add r14, r14, 16                # r14 = 16 (max queue)
     bgt r9, r14, REJECT_INTERRUPT, true     # if old_count > 16 reject
@@ -609,9 +609,13 @@ CHECK_ODD_FOR_NO_RAYS:
 no_rays_available:
     # (continues in rest of main loop file)
     
-lw r3, LOCAL_QUEUE_FLUSHING          # uint8_t flushing_queue = *(self.local_queue_flushing)
+    lw r3, LOCAL_QUEUE_FLUSHING          # uint8_t flushing_queue = *(self.local_queue_flushing)
     and r14, r3, 0                       # r14 = 0
-    bne r3, r14, INF_LOOP, false         # if (flushing_queue != 0) goto inf_loop
+    beq r3, r14, INF_LOOP, false         
+    add r3, r14, LOCAL_QUEUE_FLUSHING
+    atomadd r15, r3, 1
+    beq r15, r15, INF_LOOP, true
+NOT_FLUSHING_CORE:
     yield r8                             # yield()
     lw r3, RAY_QUEUE_HIGH                # int queue_address_high = self.ray_queue_address_high
     setmembits r3                        # set_address_bits(queue_address_high)
@@ -708,7 +712,13 @@ ENSURE_EMERGENCY_SLOT_READY:
     lhu_d r4, r3, 0                      # uint32_t new_node_id = load_dram_half(emergency_queue_low)
     add r5, r14, 1                       # r5 = 1
     sh_d r5, r3, 0                       # store_dram_byte(emergency_queue_low + 2, 0) -- mark slot consumed; differs: pseudocode writes to +2 but asm writes to +0
-    sw r5, LOCAL_QUEUE_FLUSHING          # *(self.local_queue_flushing) = 1
+    add r5, r14, LOCAL_QUEUE_FLUSHING   
+    atomadd r15, r5, 1
+    add r6, r14, 16
+EMERGENCY_SLOT_FLUSH_LOOP:
+    lw r5, LOCAL_QUEUE_FLUSHING
+    switchctx
+    beq r5, r6, EMERGENCY_SLOT_FLUSH_LOOP, true
     sw r4, CORE_ID_TO_SWITCH_TO         # *(self.local_queue_flushing + 4) = new_node_id
     beq r15, r15, SWITCH_DRAM_QUEUE, true  # goto switch_dram_queue
 
@@ -1856,6 +1866,14 @@ SWITCH_ROLES_INTERRUPT:
     intena r6                               # enable_interrupts(channel) (nothing to do)
     bne r14, r14, r4, true                             # return
 CONTINUE_WITH_SWITCH_ROLES_INTERRUPT:
+    add r9, r14, LOCAL_QUEUE_FLUSHING
+    atomadd r15, r9, 1
+    add r10, r14, 16
+WAIT_FOR_FLUSH_READY:
+    lw r9, LOCAL_QUEUE_FLUSHING
+    switchctx
+    beq r10, r9, WAIT_FOR_FLUSH_READY, true
+
     block r7                                # switch_core_request = r7 = blocking_recv(channel) (full flit value)
     # if (self.core_handled->previously_idle == 0)
     lw r9, PREVIOUSLY_IDLE                  # r9 = self.previously_idle
