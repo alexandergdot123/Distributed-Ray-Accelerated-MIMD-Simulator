@@ -2154,6 +2154,7 @@ dfs_done:
 
     add r4, r14, 0              # i = 0
     lw r6, SRAM_NODE_ALLOC_PTR         # r6 = sram_dst (start of tile data in SRAM)
+    sw r6, INDEX_ARRAY_BASE
 index_copy_loop:
     blte r3, r4, index_copy_done, true
 
@@ -2285,7 +2286,7 @@ queue_loop_2_done:
     return
 
 
-
+INDEX_ARRAY_BASE:       .data 0
 SRAM_ALLOC_COUNT:       .data 0
 SRAM_NODE_ALLOC_PTR:     .data 0
 NODE_ARRAY_TOP:         .data 0
