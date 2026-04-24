@@ -110,8 +110,8 @@ AABB_INTERSECT_RETURN:
 
     # if (node->tri_count == 0) <- ASSUME RAY -> TRI_INDEX
     lbu r6, r0, 56                  # TODO confirm offset
-    ; beq r6, r7, IS_INTERNAL_NODE, true
-    ; beq r15, r15, IS_LEAF_NODE, true
+    # ; beq r6, r7, IS_INTERNAL_NODE, true
+    # ; beq r15, r15, IS_LEAF_NODE, true
 
 IS_INTERNAL_NODE:
     # ray->ray_depth++
@@ -192,7 +192,7 @@ RAY_SEND_LOOP:
 
 REJECT_PATH:
     # push ray to DRAM queue
-    lhu r8, r1, 34                  # r8 = node->queue_high_bit_addr
+    lhu r8, r1, 40                  # r8 = node->queue_high_bit_addr
     setmembits r8                   # set address bits to reach node's DRAM stack
     lw r9, r1, 36                   # r9 = node->queue_low_bit_addr
 
@@ -230,7 +230,7 @@ RAY_DRAM_WRITE_LOOP:
 ENSURE_NO_WRITERS:
     atomadd_d r10, r9, 1            # r10 = old lock value, increment
     and r11, r11, 0                 # r11 = 0
-    bgt r11, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
+    beq r11, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
     atomadd_d r11, r9, -1           # undo our increment
 ENSURE_NO_WRITERS_LOOP:
     lw_d r10, r9, 0                 # r10 = current lock value
@@ -307,7 +307,7 @@ ENSURE_EMERGENCY_SLOT_READY:
     bne r11, r7, ENSURE_EMERGENCY_SLOT_READY, true  # spin while slot occupied (r7=0)
 
     # write node_id into slot and mark valid
-    lw r11, r1, 40                  # r11 = node->node_id
+    lw r11, r1, 44                  # r11 = node->node_id
     sh_d r11, r9, 0                 # slot->node_id = node_id (uint16)
     and r11, r11, 0
     add r11, r11, 1                 # r11 = 1
@@ -326,7 +326,7 @@ CHECK_DATA_MAILBOX:
     nonblock r12, r10               # r12 = nb_recv(thread_id) -- data mailbox
     beq r12, r7, CHECK_INTERRUPT_MAILBOX, true   # r7=0, nothing available
 
-    and r13, r13, 0                 # r13 = slot ptr (starts at 0 = invalid sentinel)
+    and r13, r0, 0                 # r13 = slot ptr (starts at 0 = invalid sentinel)
     and r14, r14, 0                 # r14 = i = 0
 DATA_RECV_LOOP:
     block r9, r10                   # r9 = ray_word from data mailbox
@@ -345,7 +345,7 @@ DATA_RECV_LOOP:
     lhu r9, r11, 0                  # r9 = leaf_core_data_addr
     sw r9, r13, -16                 # *(slot - 16) = leaf_core_data_addr
     and r13, r13, 0
-    add r13, r13, 0xFFFF            # r13 = slot = 0xFFFF sentinel (low 16; full 32 not possible in imm)
+    or r13, r13, 0xFFFF            # r13 = slot = 0xFFFF sentinel (low 16; full 32 not possible in imm)
 
 CHECK_INTERRUPT_MAILBOX:
     and r10, r15, 0xF               # r10 = thread_id
@@ -381,7 +381,9 @@ REJECT_INTERRUPT:
     and r11, r11, 0x1FFF
     and r14, r12, 0xF               # r14 = dest mailbox (message & 0xF + 16)
     add r14, r14, 16
-    sendflit r11, r9, r14           # send reject
+    sll r11, r11, 6
+    or r11, r11, r14
+    sendflit r9, r11                # send reject
     beq r15, r15, DONE_WITH_INTERRUPT, true
 
 NO_FLUSH:
@@ -400,7 +402,9 @@ NO_FLUSH:
     and r11, r11, 0x1FFF
     and r9, r12, 0xF                # r9 = dest mailbox + 16
     add r9, r9, 16
-    sendflit r11, r14, r9           # send ack
+    sll r11, r11, 6
+    or r11, r11, r14
+    sendflit r9, r11                # send reject
     beq r15, r15, DONE_WITH_INTERRUPT, true
 
 WRONG_CORE_SEND:
@@ -411,7 +415,9 @@ WRONG_CORE_SEND:
     and r11, r11, 0x1FFF
     and r14, r12, 0xF               # r14 = dest mailbox + 16
     add r14, r14, 16
-    sendflit r11, r9, r14
+    sll r11, r11, 6
+    or r11, r11, r14
+    sendflit r9, r11                # send reject
 
 DONE_WITH_INTERRUPT:
     # if (sent == 1 && slot == 0xFFFFFFFF) goto ray_done
