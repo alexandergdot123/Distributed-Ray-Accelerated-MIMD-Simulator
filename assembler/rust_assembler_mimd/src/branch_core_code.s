@@ -2081,9 +2081,11 @@ CHECK_RECURSE:
     # recurse if owner == 0xFFFF || owner == self->core_id
     add r12, r14, 0xFFFF
     beq r10, r12, DO_RECURSE, true
-    beq r10, r11, DO_RECURSE, true
+    beq r10, r11, SET_NODE_ID, true
     beq r15, r15, dfs_loop, true             # foreign owner: stop here
-
+SET_NODE_ID:
+    lw r10, r13, 44                        # node_id
+    sw r10, r13, 44                   # self.node_id = node_id from dram
 DO_RECURSE:
     # -- push right child first (so left is processed first) --
     lw_d r10, r12, 24                        # right_idx
