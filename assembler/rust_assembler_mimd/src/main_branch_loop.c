@@ -590,7 +590,7 @@ if (local_ray_count == 0)
         goto ray_done;
     }
     goto no_rays_available;
-}
+}   
 uint16_t local_ray_queue_head = self.local_ray_queue_head;
 uint32_t slot = atomic_add(local_ray_queue_head, 64);
 local_ray_queue_head += 8;

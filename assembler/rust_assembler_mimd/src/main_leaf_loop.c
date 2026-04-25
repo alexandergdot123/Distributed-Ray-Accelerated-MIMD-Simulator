@@ -391,7 +391,7 @@ else if (left_bitfield_check == 0 && right_bitfield_check == 0)
                     // } ray_queue_sram;
                     // the below should occur on an interrupt which is accepted.
 
-                    uint32_t message = blocking_receive(mailbox_index);
+                    uint32_t message = blocking_receive(32);
                     uint32_t my_node_id = *self.root_node_id;
                     uint32_t supposed_node_id = (message >> 17);
                     if (supposed_node_id != my_node_id)
@@ -530,11 +530,13 @@ if (local_ray_count > 0)
         atomic_add(local_queue_addr + 8, 1);
         goto check_dram_queue;
     }
+    // CHECK_SRAM_HEAD:
     uint32_t head = atomic_add(local_queue_addr, 64);
     head = head & 0x000007FF; // 32 slots * 64 bytes = 1024
     uint32_t ray_src = local_queue_addr + 12 + head;
 
     int ray_index = ray;
+    // RAY_UPDATE_LOOP:
     for (int i = 0; i < 16; i++)
     {
         uint32_t ray_word = *(ray_src);
@@ -549,6 +551,7 @@ if (local_ray_count > 0)
     ray->active_ray = 1;
     goto start_ray_traversal;
 }
+// NO_DRAM_RAYS:
 uint8_t flushing_queue = *(self.local_queue_flushing);
 if (flushing_queue != 0)
 {
@@ -575,6 +578,7 @@ if (cur_ray_count > 0)
             *(self->pulled_from_full_queue_address) = 0;
         }
     }
+    // CHECK_CUR_RAY_COUNT:
     int cur_ray_count_check = atomic_add_dram(queue_address_low + 8, -1);
     if (cur_ray_count_check <= 0)
     {
@@ -603,6 +607,7 @@ if (cur_ray_count > 0)
     ray->leaf_node_starting_point = self.branch_local_leaf_index;
     goto start_ray_traversal;
 }
+// NO_DRAM_RAY:
 uint32_t emergency_queue_high = self.emergency_queue_high;
 set_address_bits(emergency_queue_high);
 uint32_t emergency_queue_low = self.emergency_queue_low;

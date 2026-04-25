@@ -1,5 +1,6 @@
 .org IDK //TODO
 
+START_RAY_TRAVERSAL:
     lw r2, ROOT_NODE_ID         # r2 = node
 START_SEARCHING:
     yield r8                    # clobber r8
@@ -93,39 +94,42 @@ IS_INTERNAL_NODE:
     sb r5, r0, 62
 
     # if (node->core_owner != 0xFFFF)
-    lhu r6, r1, 30                  # r6 = node->core_owner (uint16 offset 32) TODO confirm offset
-    and r7, r7, 0
-    add r7, r7, 0xFFFF
+    lw r6, r1, 44                  # r6 = node->node_id 
+    or r7, r7, 0xFFFF
     beq r6, r7, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
-SEND_RAY_UP:
+#TODO NEED TO ADDRESS WHEN CORE ID == 0xFFFF!!!
     # uint16_t ray_send_pending_addr = self.ray_send_pending_addr;
-    lhu r8, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
+    add r8, r7, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
 
     # atomic_add(ray_send_pending_addr, 1)
-    atomadd r9, r8, 1               # r9 = clobber
+    atomadd r15, r8, 1               # r9 = clobber
 
-
-    and r10, r15, 0xF               # r10 = thread_id
-
-    and r4, r4, 0                   # r4 = 0
-    add r4, r4, -1                  # r4 = 0xFFFFFFFF = slot
+    # standalone slot sentinel init
+    # slot = 0xFFFFFFFF  //NEEDS FIX HERE! confirm r4 vs r13 as slot register
+    or r4, r4, 0xFFFF
     # uint32_t sent = 0;
     and r3, r3, 0                   # r3 = sent = 0
 
+    # disable_interrupts(32)  -- leaf core uses only mailbox 32 for interrupts
+    intdis 32
+    lhu r11, r1, 28
+    add r10, r7, 32
+    bne r11, r7, SKIP_ADDING_ONE_TO_BRANCH_CORE_MAILBOX, true
     # uint32_t request_word = (node->node_id << 17) | self.thread_id;
-    lw r12, r1, 44                  # r12 = node->node_id TODO confirm offset
-    sll r12, r12, 17
-    or r12, r12, r10                # r12 = request_word
+    add r10, r10, 1
+SKIP_ADDING_ONE_TO_BRANCH_CORE_MAILBOX:
+    sll r6, r6, 17
+    or r6, r6, r15                # r12 = request_word
 
     # send_packet(request_word, node->core_owner, 32);
-    lhu r6, r1, 30                  # r6 = node->core_owner
-    sendflit r6, r12, 32            # TODO confirm notation w/ Alex
-
+    lhu r9, r1, 30                  # r6 = node->core_owner
+    sll r9, r9, 6
+    add r9, r9, r10
+    sendflit r6, r9            # TODO confirm notation w/ Alex
 SEND_RAY_LOOP:
     # uint32_t msg_available = nb_recv(self.thread_id + 16);
-    and r7, r7, 0
     and r10, r15, 0xF               # r10 = thread_id
-    add r11, r10, 16                # r11 = thread_id + 16
+    add r11, r10, 16                # r11 = thread_id + 16 (shallow mailbox)
     nonblock r12, r11               # r12 = msg_available
     beq r12, r7, CHECK_DATA_MAILBOX, true   # r7=0, nothing on shallow mailbox
 
@@ -136,29 +140,25 @@ SEND_RAY_LOOP:
     srl r13, r12, 24                # r13 = header
 
     # if (header == ack_ray)  -- ack_ray = 5
-    and r11, r11, 0
-    add r11, r11, 5                 # r11 = 5 (ack_ray)
+    add r11, r7, 5                 # r11 = 5 (ack_ray)
     bne r13, r11, REJECT_PATH, true
 
     # ACK path: for (i = 0; i < 16; i++) send_packet(ray[i], core_owner, mailbox)
-    lhu r6, r1, 30                  # r6 = node->core_owner
+    and r9, r9, 0xFFC0                  # r6 = node->core_owner
     and r11, r12, 0xF               # r11 = dest mailbox from ack msg low nibble
-    add r13, r0, 0                  # r13 = ray base ptr
-    and r14, r14, 0                 # r14 = i = 0
+    add r9, r9, r11                  # r13 = ray base ptr
+    and r13, r0, 0                 # r14 = i = 0
+    add r11, r7, 16
 RAY_SEND_LOOP:
-    lw r9, r13, 0                   # r9 = ray word i
-    and r11, r12, 0xF               # r11 = dest mailbox from ack msg low nibble
-    sendflit r6, r9, r11            # r6 = clobber; send word to core_owner on mailbox
+    lw r7, r13, 0                   # r9 = ray word i
+    sendflit r7, r9            # send word to core_owner on mailbox
     add r13, r13, 4                 # r13 += 4 (next word)
-    add r14, r14, 1                 # i++
-    and r11, r11, 0
-    add r11, r11, 16                # r11 = 16
-    bgt r11, r14, RAY_SEND_LOOP, true   # loop while i < 16
+    add r11, r11, -1
+    bne r11, r7, RAY_SEND_LOOP, true   # loop while i < 16
     sb r7, r0, 63                   # ray->active_ray = 0  (r7=0)
     and r3, r3, 0
     add r3, r3, 1                   # r3 = sent = 1
     beq r15, r15, CHECK_DATA_MAILBOX, true
-
 REJECT_PATH:
     # push ray to DRAM queue
     lhu r8, r1, 40                  # r8 = node->queue_high_bit_addr
@@ -166,44 +166,63 @@ REJECT_PATH:
     lw r9, r1, 36                   # r9 = node->queue_low_bit_addr
 
 ENSURE_SPACE_IN_QUEUE:
-    lw_d r10, r9, -12               # r10 = cur_ray_count (count field is -12 from here)
-    and r11, r11, 0
-    add r11, r11, 255               # r11 = 255
-    bgt r10, r11, ENSURE_SPACE_IN_QUEUE, true   # spin while count > 255
-
-    add r9, r9, -16                 # r9 = queue base (tail field)
+    add r9, r9, 8
+    atomadd_d r10, r9, 1               # r10 = cur_ray_count (count field is -12 from here)
+    add r11, r7, 255               # r11 = 255
+    bgt r10, r11, THERE_EXISTS_SPACE_IN_DRAM_RAY_QUEUE, true   # spin while count > 255
+    atomadd_d r15, r9, -1
+    beq r15, r15, ENSURE_SPACE_IN_QUEUE, true
+THERE_EXISTS_SPACE_IN_DRAM_RAY_QUEUE:
+    add r9, r9, -4                 # r9 = queue base (tail field)
     atomadd_d r10, r9, 64           # r10 = old tail, advance tail by 64 bytes
     and r10, r10, 0x3FFF            # r10 = tail & 0x3FFF (ring mask)
-    add r11, r9, 536                # r11 = queue base + 536 (start of ray slots)
-    add r11, r11, r10               # r11 = write_addr = slot base + tail offset
+    add r9, r9, 536                # r11 = queue base + 540 (start of ray slots)
+    add r9, r9, r10               # r11 = write_addr = slot base + tail offset
 
 WAIT_FOR_SLOT_TO_OPEN:
     lbu_d r10, r11, 63              # r10 = slot[63] (valid byte)
     bne r10, r7, WAIT_FOR_SLOT_TO_OPEN, true   # spin while slot occupied (r7=0)
-
-    add r13, r0, 0                  # r13 = ray base ptr
-    and r14, r14, 0                 # r14 = i = 0
 RAY_DRAM_WRITE_LOOP:
-    lw r10, r13, 0                  # r10 = ray word i
+    lw r10, r0, 0                  # r10 = ray word i
     sw_d r10, r11, 0                # write to DRAM slot
-    add r13, r13, 4                 # r13 += 4
-    add r11, r11, 4                 # r11 write_addr += 4
-    add r14, r14, 1                 # i++
-    and r12, r12, 0
-    add r12, r12, 16                # r12 = 16
-    bgt r12, r14, RAY_DRAM_WRITE_LOOP, true   # loop while i < 16
+    lw r10, r0, 4                  # r10 = ray word i
+    sw_d r10, r11, 4                # write to DRAM slot
+    lw r10, r0, 8                  # r10 = ray word i
+    sw_d r10, r11, 8                # write to DRAM slot
+    lw r10, r0, 12                  # r10 = ray word i
+    sw_d r10, r11, 12                # write to DRAM slot
+    lw r10, r0, 16                  # r10 = ray word i
+    sw_d r10, r11, 16                # write to DRAM slot
+    lw r10, r0, 20                  # r10 = ray word i
+    sw_d r10, r11, 20                # write to DRAM slot
+    lw r10, r0, 24                  # r10 = ray word i
+    sw_d r10, r11, 24                # write to DRAM slot
+    lw r10, r0, 28                  # r10 = ray word i
+    sw_d r10, r11, 28                # write to DRAM slot
+    lw r10, r0, 32                  # r10 = ray word i
+    sw_d r10, r11, 32                # write to DRAM slot
+    lw r10, r0, 36                  # r10 = ray word i
+    sw_d r10, r11, 36                # write to DRAM slot
+    lw r10, r0, 40                  # r10 = ray word i
+    sw_d r10, r11, 40                # write to DRAM slot
+    lw r10, r0, 44                  # r10 = ray word i
+    sw_d r10, r11, 44                # write to DRAM slot
+    lw r10, r0, 48                  # r10 = ray word i
+    sw_d r10, r11, 48                # write to DRAM slot
+    lw r10, r0, 52                  # r10 = ray word i
+    sw_d r10, r11, 52                # write to DRAM slot
+    lw r10, r0, 56                  # r10 = ray word i
+    sw_d r10, r11, 56                # write to DRAM slot
+    lw r10, r0, 60                  # r10 = ray word i
+    sw_d r10, r11, 60                # write to DRAM slot
 
     lw r9, r1, 36                   # r9 = queue_low_bit_addr (reload)
     add r9, r9, 20                  # r9 = &lock field (offset 20 from queue base)
 
 ENSURE_NO_WRITERS:
     atomadd_d r10, r9, 1            # r10 = old lock value, increment
-    and r11, r11, 0                 # r11 = 0
-    beq r11, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
+    beq r7, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
     atomadd_d r11, r9, -1           # undo our increment
-ENSURE_NO_WRITERS_LOOP:
-    lw_d r10, r9, 0                 # r10 = current lock value
-    bgt r11, r10, ENSURE_NO_WRITERS_LOOP, true   # spin while lock < 0 (writer active)
     beq r15, r15, ENSURE_NO_WRITERS, true        # retry claim
 
 SKIP_UNDO_LOCK:
@@ -215,8 +234,7 @@ SKIP_UNDO_LOCK:
     srl r12, r15, 4                 # r12 = core_id
     xor r12, r12, r11               # r12 = core_id ^ clock = raw idx
     lhu r13, r1, 38                 # r13 = node->prev_index
-    beq r12, r13, BUMP_IDX, true    # if idx == prev_idx, bump to avoid repeat
-    beq r15, r15, SKIP_BUMP, true
+    bne r12, r13, SKIP_BUMP, true    # if idx == prev_idx, bump to avoid repeat
 BUMP_IDX:
     add r12, r12, 1                 # r12 = idx + 1
 SKIP_BUMP:
@@ -224,8 +242,8 @@ SKIP_BUMP:
     sh r12, r1, 38                  # node->prev_index = idx
     sll r12, r12, 1                 # r12 = idx * 2 (uint16 slots)
     add r9, r9, r12                 # r9 = &core_slots[idx]
-    lw_d r10, r9, 28                # r10 = core_to_cache (core_slots at +28 from lock field)
-    sh r10, r1, 32                  # node->core_owner = core_to_cache
+    lh_d r10, r9, 8                # r10 = core_to_cache (core_slots at +28 from lock field)
+    sh r10, r1, 34                  # node->core_owner = core_to_cache
     beq r15, r15, SKIP_EMERGENCY_ENQUEUE, true
 
 NO_OWNER:
@@ -235,9 +253,8 @@ NO_OWNER:
     sh r11, r1, 32                  # node->core_owner = 0xFFFF
 
     # if (cur_ray_count > 200) -> emergency queue insertion
-    # cur_ray_count still valid from ENSURE_SPACE_IN_QUEUE in r10? No — reload
     lw r9, r1, 36                   # r9 = queue_low_bit_addr (reload)
-    lw_d r10, r9, -12               # r10 = cur_ray_count
+    lw_d r10, r9, 8               # r10 = cur_ray_count
     and r11, r11, 0
     add r11, r11, 200               # r11 = 200
     blte r10, r11, SKIP_EMERGENCY_ENQUEUE, true   # if count <= 200 skip emergency
@@ -278,8 +295,7 @@ ENSURE_EMERGENCY_SLOT_READY:
     # write node_id into slot and mark valid
     lw r11, r1, 44                  # r11 = node->node_id
     sh_d r11, r9, 0                 # slot->node_id = node_id (uint16)
-    and r11, r11, 0
-    add r11, r11, 1                 # r11 = 1
+    add r11, r7, 1                 # r11 = 1
     sb_d r11, r9, 2                 # slot->is_valid = 1
 
 SKIP_EMERGENCY_ENQUEUE:
@@ -289,124 +305,102 @@ SKIP_EMERGENCY_ENQUEUE:
     sb r7, r0, 63                   # ray->active_ray = 0  (r7=0)
     and r3, r3, 0
     add r3, r3, 1                   # r3 = sent = 1
-
 CHECK_DATA_MAILBOX:
     and r10, r15, 0xF               # r10 = thread_id
-    nonblock r12, r10               # r12 = nb_recv(thread_id) -- data_available
-    beq r12, r7, CHECK_INTERRUPT_MAILBOX, true   # r7=0, nothing available
-
-    and r13, r0, 0                 # r13 = slot ptr (starts at 0 = invalid sentinel)
-    and r14, r14, 0                 # r14 = i = 0
-DATA_RECV_LOOP:
-    block r9, r10                   # r9 = ray_word from data mailbox
-    sw r9, r13, 0                   # *slot = ray_word
-    add r13, r13, 4                 # slot += 4
-    add r14, r14, 1                 # i++
-    and r11, r11, 0
-    add r11, r11, 16                # r11 = 16
-    bgt r11, r14, DATA_RECV_LOOP, true   # loop while i < 16
-
-
-    and r4, r4, 0
-    add r4, r4, -1            # r13 = slot = 0xFFFF sentinel (low 16; full 32 not possible in imm)
-
-CHECK_INTERRUPT_MAILBOX:        # TODO continue form here
-    and r11, r11, 0                 # r11 = thread_id & 1
-    add r11, r11, 32                # r11 = interrupt mailbox index
-    nonblock r12, r11               # r12 = nb_recv(interrupt mailbox)
-    beq r12, r7, DONE_WITH_INTERRUPT, true   # r7=0, nothing available
-    block r12, r11                  # r12 = message
-
-    srl r8, r12, 17                 # r8 = supposed_node_id (message >> 17)
-    lw r9, ROOT_NODE_ID             # r9 = self.root_node_id
-    bne r8, r9, WRONG_CORE_SEND, true   # node mismatch -> wrong core
-
-    lw r8, LOCAL_QUEUE              # r8 = self.local_queue
-    add r8, r8, 8                   # r8 = skip head and tail
-    and r9, r10, 1                  # r9 = thread_id & 1
-    and r11, r11, 0
-    add r11, r11, 1036              # r11 = 1036
-    mul r9, r9, r11                 # r9 = odd_thread * 1036
-    add r8, r8, r9                  # r8 = &local_queue for this thread parity
-    atomadd r9, r8, 1               # r9 = old_count
-    lw r11, LOCAL_QUEUE_FLUSHING   # r11 = flushing flag
-    and r14, r14, 0
-    add r14, r14, 16                # r14 = 16 (max queue)
-    bgt r9, r14, REJECT_INTERRUPT, true     # if old_count > 16 reject
-    beq r11, r7, NO_FLUSH, true     # r7=0; if not flushing proceed
-REJECT_INTERRUPT:
-    atomadd r9, r8, -1              # undo count increment
-    and r9, r9, 0
-    add r9, r9, 7                   # r9 = reject_ray = 7
-    sll r9, r9, 24                  # r9 = reject_ray << 24
-    srl r11, r12, 4                 # r11 = dest core (message >> 4 & 0x1FFF)
-    and r11, r11, 0x1FFF
-    and r14, r12, 0xF               # r14 = dest mailbox (message & 0xF + 16)
-    add r14, r14, 16
-    sll r11, r11, 6
-    or r11, r11, r14
-    sendflit r9, r11                # send reject
-    beq r15, r15, DONE_WITH_INTERRUPT, true
-
-NO_FLUSH:
-    add r8, r8, -4                  # r8 = &tail_relative field
-    atomadd r9, r8, 64              # r9 = old tail, advance by 64
-    and r9, r9, 0x3FF               # r9 = tail & 0x3FF (ring mask)
-    add r8, r8, 8                   # r8 = back to queue data base
-    add r8, r8, r9                  # r8 = slot = queue_base + tail_relative
-    # slot is now r8 -- send ack with our thread_id
-    and r14, r14, 0
-    add r14, r14, 5                 # r14 = ray_ack = 5
-    sll r14, r14, 24                # r14 = ray_ack << 24
-    and r10, r15, 0xF               # r10 = thread_id
-    or r14, r14, r10                # r14 = ray_ack << 24 | thread_id
-    srl r11, r12, 4                 # r11 = dest core
-    and r11, r11, 0x1FFF
-    and r9, r12, 0xF                # r9 = dest mailbox + 16
-    add r9, r9, 16
-    sll r11, r11, 6
-    or r11, r11, r14
-    sendflit r9, r11                # send reject
-    beq r15, r15, DONE_WITH_INTERRUPT, true
-
-WRONG_CORE_SEND:
-    and r9, r9, 0
-    add r9, r9, 8                   # r9 = wrong_core = 8
-    sll r9, r9, 24                  # r9 = wrong_core << 24
-    srl r11, r12, 4                 # r11 = dest core
-    and r11, r11, 0x1FFF
-    and r14, r12, 0xF               # r14 = dest mailbox + 16
-    add r14, r14, 16
-    sll r11, r11, 6
-    or r11, r11, r14
-    sendflit r9, r11                # send reject
-
-DONE_WITH_INTERRUPT:
-    # if (sent == 1 && slot == 0xFFFFFFFF) goto ray_done
-    # r3 = sent, check if sent == 1
-    and r11, r11, 0
-    add r11, r11, 1                 # r11 = 1
-    bne r3, r11, SEND_RAY_LOOP, true    # if sent != 1 keep looping
-    # check slot == 0xFFFFFFFF sentinel (r13 == 0xFFFF as 16-bit stand-in)
-    and r11, r11, 0
-    add r11, r11, 0xFFFF            # r11 = sentinel value
-    bne r13, r11, SEND_RAY_LOOP, true   # if slot not sentinel keep looping
-    beq r15, r15, DECREMENT_PENDING, true
-
-DECREMENT_PENDING:
-    and r10, r15, 0xF               # r10 = thread_id
-    and r11, r10, 1                 # r11 = thread_id & 1
-    add r11, r11, 32                # r11 = interrupt mailbox index
-    intdis r11                      # disable interrupts
-    lw r8, RAY_SEND_PENDING_ADDR    # r8 = &ray_send_pending
-    atomadd r9, r8, -1              # decrement pending count
+    nonblock r12, r10               # r12 = nb_recv(thread_id) -- data mailbox
+    and r7, r7, 0
+    beq r12, r7, CHECK_INTERRUPT_MAILBOX, true   # r7=0, nothing available.
+    block r11, r10
+    sw r11, r4, 0
+    block r11, r10
+    sw r11, r4, 4
+    block r11, r10
+    sw r11, r4, 8
+    block r11, r10
+    sw r11, r4, 12
+    block r11, r10
+    sw r11, r4, 16
+    block r11, r10
+    sw r11, r4, 20
+    block r11, r10
+    sw r11, r4, 24
+    block r11, r10
+    sw r11, r4, 28
+    block r11, r10
+    sw r11, r4, 32
+    block r11, r10
+    sw r11, r4, 36
+    block r11, r10
+    sw r11, r4, 40
+    block r11, r10
+    sw r11, r4, 44
+    block r11, r10
+    sw r11, r4, 48
+    block r11, r10
+    sw r11, r4, 52
+    block r11, r10
+    sw r11, r4, 56
+    block r11, r10
+    sw r11, r4, 60
+    add r11, r7, 1
+    sb r11, r4, 63
+CHECK_INTERRUPT_MAILBOX:
+    nonblock r11, 32
+    beq r11, r7, SKIP_INTERRUPT_MAILBOX, true
+    block r11, 32
+    srl r12, r11, 17
+    lw r6, ROOT_NODE_ID
+    beq r12, r6, CORRECT_NODE_ID, true
+SEND_REJECT_RAY_MSG:
+    add r12, r7, 8
+    srl r13, r11, 4
+    sll r13, r13, 19
+    srl r13, r13, 13
+    and r11, r11, 0xF
+    or r13, r13, r11
+    sendflit r12, r13
+    beq r15, r15, SKIP_INTERRUPT_MAILBOX, true
+CORRECT_NODE_ID:
+    lbu r10, r0, 63
+    bne r10, r7, NO_ROOM_IN_RAY_SLOT, true
+    add r4, r0, 0
+    beq r15, r15, SEND_ACK_PACKET, true
+NO_ROOM_IN_RAY_SLOT:
+    add r10, r7, RAY_QUEUE_CNT
+    atomadd r5, r10, 1
+    add r6, r7, 31
+    blte r6, r5, SPACE_IN_QUEUE, true
+    atomadd r15, r10, -1
+    beq r15, r15, SEND_REJECT_RAY_MSG, true
+SPACE_IN_QUEUE:
+    add r10, r10, -4
+    atomadd r6, r10, 64
+    and r6, r6, 0x7FF
+    add r10, r10, r6
+    add r4, r10, 8
+SEND_ACK_PACKET:
+    add r12, r7, 5
+    srl r13, r11, 4
+    sll r13, r13, 19
+    srl r13, r13, 13
+    and r11, r11, 0xF
+    or r13, r13, r11
+    or r12, r12, r15
+    sendflit r12, r13
+SKIP_INTERRUPT_MAILBOX:
+    or r12, r12, 0xFFFF
+    bne r12, r4, send_ray_loop, false
+    beq r3, r7, send_ray_loop, false
+    intena 32
+    add r3, r7, RAY_SEND_PENDING 
+    atomadd r15, r3, -1
     beq r15, r15, ray_done, true
-
 TRAVERSE_OWN_CHILD:
     # node = node->left_child
     lhu r1, r1, 24                  # r1 = node->left_child
-    beq r15, r15, start_ray_traversal, true
+    beq r15, r15, START_SEARCHING, true
 IS_LEAF_NODE:
+    and r7, r7, 0
     lbu r10, r1, 30
     sll r10, r10, 2
     add r10, r10, r0
@@ -418,24 +412,26 @@ IS_LEAF_NODE:
     sll r13, r13, r12
     or r11, r13, r11
     sw r11, r10, 44
-    lhu r2, r0, 32
-    lbu r3, r0, 31
+    lhu r2, r1, 32              # r2 - tri_index
+    lbu r3, r1, 31              # r3 = tri_count
 TRIANGLE_INTERSECT_LOOP:
     beq r15, r15, triangle_intersect, true
 TRIANGLE_INTERSECT_RETURN:
+    add r2, r2, 6
     lbu r5, r0, 61
     and r4, r4, 0
     lw r6, r0, 56
     beq r4, r5, SHADOW_RAY_NOT_OCCLUDED, true
-    or r5, r5, 0xFFFF
+    and r5, r5, 0
+    add r5, r5, -1
     beq r5, r6, SHADOW_RAY_NOT_OCCLUDED, true
     beq r15, r15, SHADOW_RAY_OCCLUDED, true
 SHADOW_RAY_NOT_OCCLUDED:
-    add r2, r2, 12
     add r3, r3, -1
     bne r4, r3, TRIANGLE_INTERSECT_LOOP, true
     lhu r1, r1, 28
     beq r15, r15, START_SEARCHING, true
+
 AABB_MISS:
     lbu r10, r1, 30
     sll r10, r10, 2
@@ -450,6 +446,256 @@ AABB_MISS:
     sw r11, r10, 44
     lhu r1, r1, 28
     beq r15, r15, START_SEARCHING, true
+
+SHADOW_RAY_OCCLUDED:
+    and r7, r7, 0
+    # BIG TODO; Alex explain the math for ray_result_addr stuff
+
+    # uint32_t finished_ray_high = self.ray_result_addr_high;
+    lw r10, RAY_RESULT_HIGH # r10 = finished_ray_high TODO Alex tf is this
+
+    # set_address_bits(finished_ray_high);
+    memsetbits r10
+
+    # uint32_t result_addr_low = self.ray_result_addr_low;
+    lw r11, RAY_RESULT_LOW # r11 = result_addr_low
+
+    # atomic_add_dram(result_addr_low, 1); // increment finished ray counter
+    atomadd_d r12, r11, 1           # r12 = old finished ray count, increment
+
+    # uint32_t pix_index = ray->pix_y;
+    lhu r13, r0, 54         # r13 = pix_index
+
+    # pix_index *= 2560;
+    sll r13, r13, 9         # r13 = pix_index * 512
+    add r12, r13, 0         # r12 = pix_index * 512
+    sll r13, r13, 2         # r13 = pix_index * 2048
+    add r12, r13, r12        # r12 = pix_index * 2560
+
+    # pix_index += ray->pix_x;
+    lhu r13, r0, 52         # r13 = ray -> pix_x 
+    add r12, r13, r12        # pix_index += pix_x
+
+    # pix_index <<= 8;
+    sll r12, r12, 8         # pix_index <<= 8
+
+    # result_addr_low += pix_index;
+    add r11, r12, r11        # result_addr_low += pix_index
+
+    # uint32_t bounce = ray->bounce_count;
+    lbu r10, r0, 60         # r10 = bounce_count
+
+    # bounce <<= 6;
+    sll r10, r10, 6         # bounce <<= 6
+
+    # result_addr_low += bounce;
+    add r11, r10, r11        # result_addr_low += bounce
+
+    # uint32_t shadow = ray->light_id;
+    lbu r10, r0, 61         # r10 = shadow
+
+    # result_addr_low += shadow << 4;
+    sll r10, r10, 4         # shadow <<= 4
+    add r11, r10, r11        # result_addr_low += shadow
+
+    # Write 1.0 to len_sq slot to mark as occluded (blocked)
+    # uint32_t one = 0x3F800000;
+    lw r10, ONE
+
+    # store_dram_word(result_addr_low + 12, one);
+    add r11, r11, 12         # r11 = result_addr_low + 12
+    sw_d r10, r11, 0         # store 1.0 to len_sq slot
+
+    # ray->active_ray = 0;
+    sb r7, r0, 63           # ray->active_ray = 0 (r7=0)
+
+    # goto ray_done;
+    # redunant
+
+ray_done:
+    # ; if (ray->active_ray == 1) { goto start_ray_traversal; }
+    and r7, r7, 0
+    add r7, r7, 1
+    lb r8, r0, 63
+    beq r8, r7, START_RAY_TRAVERSAL, true
+
+    # yield();
+    yield r8
+
+    # Check local SRAM ray queue
+    # uint32_t local_queue_addr = self.local_ray_queue;
+    lw r8, LOCAL_RAY_QUEUE # r8 = local_queue_addr
+
+    # uint32_t local_ray_count = *(local_queue_addr + 8);
+    add r8, r8, 8           # r8 = local_queue_addr + 8
+    lw r9, r8, 0           # r9 = local_ray_count
+
+    # if (local_ray_count > 0) { ... }
+    and r7, r7, 0
+    blte r9, r7, NEGATIVE_RAY_COUNT, false
+    
+    # uint32_t old_count = atomic_add(local_queue_addr + 8, -1);
+    atomadd r10, r8, -1          # r10 = old_count, decrement local_ray_count
+    bgt r10, r7, CHECK_SRAM_HEAD, true
+    atomadd r10, r8, 1          # r10 = old_count, decrement local_ray_count
+    beq r15, r15, CHECK_DRAM_QUEUE, true
+CHECK_SRAM_HEAD:
+    # uint32_t head = atomic_add(local_queue_addr, 64);
+    and r7, r7, 0
+    add r7, r7, 64
+    lw r8, LOCAL_RAY_QUEUE
+    atomadd r10, r8, r7          # r10 = head, advance head by 64 bytes
+    and r7, r7, 0
+    # head = head & 0x000007FF; // 32 slots * 64 bytes = 1024
+    and r10, r10, 0x7FF          # r10 = head & 0x7FF (ring buffer mask)
+    # uint32_t ray_src = local_queue_addr + 12 + head;
+    add r10, r10, 12             # r10 = local_queue_addr + 12 + head (ray slot address)
+    add r10, r10, r8
+    # int ray_index = ray;
+    add r11, r0, 0
+    and r7, r7, 0
+    add r6, r7, 16
+RAY_UPDATE_LOOP:
+    beq r7, r6, RAY_UPDATE_LOOP_DONE, true
+    # uint32_t ray_word = *(ray_src);
+    lw r12, r10, 0
+    # *(ray_index) = ray_word;
+    sw r12, r11, 0
+    # ray_src = ray_src + 4;
+    add r10, r10, 4
+    # ray_index = ray_index + 4;
+    add r11, r11, 4
+    add r7, r7, 1
+    beq r15, r15, RAY_UPDATE_LOOP, true
+RAY_UPDATE_LOOP_DONE:
+    and r7, r7, 0
+    # *(ray_src - 1) = 0;
+    add r10, r10, -4 # <- I think??
+    # ray->leaf_node_starting_point = self.branch_local_leaf_index;
+    lw r8, BRANCH_LOCAL_LEAF_INDEX # TODO Alex what
+    # ray->active_ray = 1;
+    add r7, r7, 1
+    sb r7, r0, 63           # ray->active_ray = 1 (r7=0)
+    # goto start_ray_traversal;
+    beq r15, r15, START_RAY_TRAVERSAL, true
+NEGATIVE_RAY_COUNT:
+    # uint8_t flushing_queue = *(self.local_queue_flushing);
+    lw r8, LOCAL_QUEUE_FLUSHING # r8 = &local_queue_flushing
+    lbu r8, r8, 0
+    # if (flushing_queue != 0){ goto inf_loop; }
+    and r7, r7, 0
+    bne r8, r7, INF_LOOP, true
+CHECK_DRAM_QUEUE:
+    # yield();
+    yield r8
+    # int queue_address_low = self.ray_queue_address_low;
+    lw r9, RAY_QUEUE_LOW # TODO Alex what is this
+    # int queue_address_high = self.ray_queue_address_high;
+    lw r10, RAY_QUEUE_HIGH
+    # set_address_bits(queue_address_high);
+    setmembits r10
+    # int cur_ray_count = load_dram_word(queue_address_low + 8);
+    add r9, r9, 8           # r9 = queue_address_low + 8
+    lw_d r11, r9, 0       # r11 = cur_ray_count
+
+    # if (cur_ray_count > 0) { ... }
+    and r7, r7, 0
+    blte r11, r7, NO_DRAM_RAYS, false
+
+    #     if (cur_ray_count >= 256) { ... }
+    and r7, r7, 0
+    add r7, r7, 256
+    blte r11, r7, DONT_ASK_FOR_HELP, true
+    # uint32_t num_times_pulled_from_full_queue = atomic_add(pulled_from_full_queue_address, 1);
+    and r9, r9, 0
+    add r9, r9, PULLED_FROM_FULL_QUEUE_CNT
+    atomadd r9, r9, 1           # r9 = old count, increment
+    # if (num_times_pulled_from_full_queue > BRANCH_BUSY_THRESHOLD)
+    and r7, r7, 0
+    add r7, r7, 200
+    blte r9, r7, CHECK_CUR_RAY_COUNT, true
+    # TODO CALL branch_core_ask_for_help
+    jmp branch_core_ask_for_help, r14
+DONT_ASK_FOR_HELP:
+    # *(self->pulled_from_full_queue_address) = 0;
+    and r9, r9, 0
+    and r7, r7, 0
+    add r9, r9, PULLED_FROM_FULL_QUEUE_CNT    
+    sw r9, r9, r7
+CHECK_CUR_RAY_COUNT:
+    # int cur_ray_count_check = atomic_add_dram(queue_address_low + 8, -1);
+    lw r9, RAY_QUEUE_LOW # TODO Alex what is this
+    add r9, r9, 8           # r9 = queue_address_low + 8
+    atomadd_d r11, r9, -1       # r11 = cur_ray_count_check, decrement    
+    #if (cur_ray_count_check <= 0)
+    # {
+    #     atomic_add_dram(queue_address_low + 8, 1);
+    #     goto ray_done;
+    # }
+    and r7, r7, 0
+    bgt r11, r7, PROCEED_TO_READ_RAY, true
+
+    atomadd_d r11, r9, 1
+    beq r15, r15, ray_done, true
+PROCEED_TO_READ_RAY:
+    # int head = atomic_add_dram(queue_address_low, 64);
+    add r9, r9, -8 
+    and r7, r7, 0
+    add r7, r7, 64
+    atomadd_d r10, r9, r7       # r10 = head, advance head by 64 bytes
+
+    # queue_address_low = queue_address_low + 536; // skip header + core_slots to ray data
+    add r9, r9, 536                # r9 = queue_address_low + 536 (start of ray slots)
+    # head = head & 0x00003FFF;
+    and r10, r10, 0x3FFF            # r10 = head & 0x3FFF (ring buffer mask for 16KB queue)
+    # queue_address_low += head;
+    add r9, r9, r10               # r9 = queue_address_low + 536 + head (ray slot address)
+
+WAIT_FOR_WRITE:
+    # int ready = load_dram_byte(queue_address_low + 63);
+    add r10, r9, 63              # r10 = queue_address_low + 63
+    lbu r10, r10, 0              # r10 = ready byte
+    # if (ready == 0)
+    # {
+    #    goto wait_for_write;
+    # }
+    and r7, r7, 0
+    beq r10, r7, WAIT_FOR_WRITE, true   # r7=0, spin while not ready
+
+    # int ray_index = ray;
+    add r11, r0, 0
+    and r7, r7, 0
+    add r6, r7, 16
+WRITE_TO_RAY_IDX_LOOP:
+    # for (int i = 0; i < 16; i++)
+    # {
+    #     *(ray_index) = load_dram_word(queue_address_low);
+    #     queue_address_low = queue_address_low + 4;
+    #     ray_index = ray_index + 4;
+    # }
+    beq r7, r6, WRITE_TO_RAY_IDX_LOOP_DONE, true
+    lw_d r12, r9, 0           # r12 = load_dram_word(queue_address_low)
+    sw r12, r11, 0         # *(ray_index) = ray_word
+    add r9, r9, 4           # queue_address_low = queue_address_low + 4
+    add r11, r11, 4         # ray_index = ray_index + 4
+    add r7, r7, 1
+    beq r15, r15, WRITE_TO_RAY_IDX_LOOP, true
+WRITE_TO_RAY_IDX_LOOP_DONE:
+    # write_dram_byte(queue_address_low - 1, 0); // mark consumed
+    add r9, r9, -1          # r9 = queue_address_low - 1
+    sb_d r7, r9, 0           # write 0 to ready byte to mark consumed
+    add r9, r9, 1           # restore r9 to point to start of ray slot
+    # ray->leaf_node_starting_point = self.branch_local_leaf_index;
+    lw r8, BRANCH_LOCAL_LEAF_INDEX
+    sw r8, r0, 40          # ray->leaf_node_starting_point = branch_local_leaf_index
+    # goto start_ray_traversal;   
+    beq r15, r15, START_RAY_TRAVERSAL, true 
+NO_DRAM_RAYS:
+
+
+
+
+    
 TRAVERSE_LEFT_OR_RIGHT:
     or r10, r10, 0xFFFF
     lbu r12, r0, 62
