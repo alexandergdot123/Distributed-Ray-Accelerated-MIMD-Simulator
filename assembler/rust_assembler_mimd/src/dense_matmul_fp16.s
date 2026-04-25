@@ -1,7 +1,7 @@
 .org 0x0028
 .data 106
 setctx 16
-relinquish
+relinquish 1
 # r0 starts at 0 (if not guaranteed, keep this)
 and r15, r15, 0 #should have zero effect, just for testing purposes
 and r0, r0, 0
@@ -33,13 +33,13 @@ add r1, r1, r11
 START_LOOP: 
 and r11, r11, 0
 bne r11, r12, GET_X_FROM_MAILBOX, true
-lhu_d r2, r0
+lhu_d r2, r0, 0
 beq r15, r15, DO_Y, true
 GET_X_FROM_MAILBOX: 
 block r2, r14 
 DO_Y: 
 bne r11, r13, GET_Y_FROM_MAILBOX, true
-lhu_d r3, r1
+lhu_d r3, r1, 0
 beq r15, r15, START_MUL, true
 GET_Y_FROM_MAILBOX: 
 add r10, r14, 16
