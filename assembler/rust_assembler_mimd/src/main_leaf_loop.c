@@ -379,7 +379,7 @@ else if (left_bitfield_check == 0 && right_bitfield_check == 0)
                         slot = slot + 4;
                     }
                     slot = 0xFFFFFFFF;
-                }
+                }               
                 uint32_t interrupt_available = nb_recv(32);
                 if (interrupt_available != 0)
                 {

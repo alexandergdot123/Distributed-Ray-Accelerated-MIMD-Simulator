@@ -307,8 +307,8 @@ DATA_RECV_LOOP:
     bgt r11, r14, DATA_RECV_LOOP, true   # loop while i < 16
 
 
-    and r13, r13, 0
-    add r13, r13, -1            # r13 = slot = 0xFFFF sentinel (low 16; full 32 not possible in imm)
+    and r4, r4, 0
+    add r4, r4, -1            # r13 = slot = 0xFFFF sentinel (low 16; full 32 not possible in imm)
 
 CHECK_INTERRUPT_MAILBOX:        # TODO continue form here
     and r11, r11, 0                 # r11 = thread_id & 1
