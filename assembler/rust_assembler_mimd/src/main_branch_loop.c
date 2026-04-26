@@ -60,7 +60,7 @@ typedef struct
     uint32_t now_serving; // spin on when this value equals your ticket, then increment when done
     uint32_t lock;
     uint32_t core_owner_count;
-    uint16_t core_slots[256];
+    uint16_t core_slots[8100];
     struct Ray[256] rays; // 256 * 64 bytes for the rays
 } ray_queue_dram;
 

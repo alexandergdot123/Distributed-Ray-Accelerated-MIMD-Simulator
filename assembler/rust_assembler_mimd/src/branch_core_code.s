@@ -207,7 +207,7 @@ ENSURE_SPACE_IN_QUEUE:
     add r9, r9, -16                 # r9 = queue base (tail field)
     atomadd_d r10, r9, 64           # r10 = old tail, advance tail by 64 bytes
     and r10, r10, 0x3FFF            # r10 = tail & 0x3FFF (ring mask)
-    add r11, r9, 536                # r11 = queue base + 536 (start of ray slots)
+    add r11, r9, 16224                # r11 = queue base + 536 (start of ray slots)
     add r11, r11, r10               # r11 = write_addr = slot base + tail offset
 
 WAIT_FOR_SLOT_TO_OPEN:
@@ -626,7 +626,7 @@ NOT_FLUSHING_CORE:
     setmembits r3                        # set_address_bits(queue_address_high)
     lw r3, RAY_QUEUE_LOW                 # int queue_address_low = self.ray_queue_address_low
     and r14, r15, 1                      # r14 = self.is_branch_core (bit 0 of r15)
-    mul r14, r14, 16924                  # r14 *= 16924 (offset to branch queue if branch core)
+    mul r14, r14, 32612                  # r14 *= 16924 (offset to branch queue if branch core)
     add r3, r3, r14                      # queue_address_low += r14 (select correct queue)
     lw_d r4, r3, 8                       # int cur_ray_count = load_dram_word(queue_address_low + 8)
     blte r4, r14, DRAM_RAY_QUEUE_EMPTY, true  # if (cur_ray_count <= 0) goto DRAM_RAY_QUEUE_EMPTY
@@ -648,7 +648,7 @@ PULL_ELEM_FROM_DRAM_QUEUE:
 STILL_ELEM_IN_QUEUE:
     add r3, r3, -8                       # queue_address_low -= 8 (back to base)
     atomadd_d r4, r3, 64                 # int head = atomic_add_dram(queue_address_low, 64) -- advance head
-    add r3, r3, 540                      # queue_address_low += 540 (skip head/count fields, +16 base + 524 padding? -- differs from pseudocode's +16)
+    add r3, r3, 16228                      # queue_address_low += 540 (skip head/count fields, +16 base + 524 padding? -- differs from pseudocode's +16)
     and r4, r4, 0x3FFF                   # head = head & 0x00003FFF
     add r4, r3, r4                       # queue_address_low = queue_address_low + head
 WAIT_FOR_WRITE:
@@ -2391,6 +2391,153 @@ RELEASE_INSERT_LOCK:
     atomadd_d r12, r10, r5     # advance now_serving
 
     beq r15, r15, RETURN_FROM_INSERT_DRAM_QUEUE, true
+
+
+SWITCH_DRAM_QUEUE:
+    lw r12, NODE_ID_TABLE_HIGH
+    setmembits r12
+    lw r12, NODE_ID_TABLE_LOW
+    sll r11, r11, 2
+    add r12, r12, r11
+    lw_d r9, r12, 0
+    lw_d r10, r12, 4
+    lw r2, RAY_QUEUE_HIGH   # r2 = q_high #assume high in r2, low in
+    lw r3, RAY_QUEUE_LOW    # r3 = q_low
+    sw r9, RAY_QUEUE_HIGH
+    sw r10, RAY_QUEUE_LOW
+    and r14, r14, 0
+    add r9, r14, LOCAL_QUEUE_FLUSHING
+    atomadd r15, r9, 1
+    add r10, r14, 16 
+WAIT_FOR_FLUSH_READY:
+    lw r9, LOCAL_QUEUE_FLUSHING
+    switchctx
+    beq r10, r9, WAIT_FOR_FLUSH_READY, true
+    # ;     set_address_bits(q_high);
+
+    setmembits r2
+# ;     uint32_t my_ticket = atomic_add_dram(q_low + 12, 1);
+    add r4, r3, 12
+    atomadd_d r5, r4, 1
+REMOVE_TICKET_WAIT_EMERGENCY:
+    lw_d r4, r3, 16
+    bne r4, r5, REMOVE_TICKET_WAIT_EMERGENCY, true
+    add r4, r3, 20
+    and r5, r5, 0
+    add r5, r5, -8192
+    atomadd_d r15, r4, r5
+LOCKING_BULLSHIT_EMERGENCY:
+    lw_d r9, r4, 0
+    bne r5, r9, LOCKING_BULLSHIT_EMERGENCY, true
+    add r6, r3, 28 
+    and r8, r8, 0
+    srl r9, r15, 4
+    lw_d r4, r4, 4
+find_our_slot_remove_emergency:
+    add r10, r14, 256
+    beq r4, r10, RELEASE_INSERT_LOCK, false
+    sll r10, r8, 1              # r10 = i * 2
+    add r10, r10, r6            # r10 = slots_base + i * 2
+    lhu_d r11, r10, 0           # r11 = slot_val
+    beq r11, r9, found_our_slot_remove_emergency, true
+    add r8, r8, 1
+    beq r15, r15, find_our_slot_remove_emergency, true
+
+found_our_slot_remove_emergency:
+    # last_slot_addr = slots_base + (owner_count - 1) * 2
+    add r11, r4, -1             # r11 = owner_count - 1
+    sll r11, r11, 1             # r11 = (owner_count - 1) * 2
+    add r11, r11, r6            # r11 = last_slot_addr
+    # last_val = load_dram_half(last_slot_addr)
+    lhu_d r12, r11, 0           # r12 = last_val
+    # store_dram_half(slots_base + i * 2, last_val)
+    # r10 still = slots_base + i * 2
+    sh_d r12, r10, 0            # slots[i] = last_val
+    # store_dram_half(last_slot_addr, 0)
+    and r12, r12, 0
+    sh_d r12, r11, 0            # last slot = 0
+    # atomic_add_dram(q_low + 24, -1)
+    add r10, r3, 24             # r10 = &core_owner_count
+    atomadd_d r12, r10, -1     # core_owner_count--
+release_remove_emergency:
+    # atomic_add_dram(q_low + 20, LOCK_DECREMENT)
+    # rebuild LOCK_DECREMENT = 0x7FFFFFFF
+    add r10, r3, 20             # r10 = &lock
+    atomadd_d r12, r10, 8192     # release lock
+    # atomic_add_dram(q_low + 16, 1)
+    add r10, r3, 16             # r10 = &now_serving
+    and r5, r5, 0
+    add r5, r5, 1
+    atomadd_d r12, r10, r5     # advance now_serving
+# ;     set_address_bits(q_high);
+    lw r2, RAY_QUEUE_HIGH   # ASSUME: r2 = q_high
+    lw r3, RAY_QUEUE_LOW    # r3 = q_low
+    setmembits r2
+# ;     uint32_t my_ticket = atomic_add_dram(q_low + 12, 1);
+    add r4, r3, 12
+    atomadd_d r5, r4, 1
+ADD_TICKET_WAIT_EMERGENCY:
+# ;     uint32_t now_serving = load_dram_word(q_low + 16)
+# ;     if (now_serving != my_ticket) <- should be while
+# ;     {
+# ;         now_serving = load_dram_word(q_low + 16)
+# ;     }
+    lw_d r4, r3, 16
+    bne r4, r5, ADD_TICKET_WAIT_EMERGENCY, true
+
+# ;     int32_t lock_val = atomic_add_dram(q_low + 20, -LOCK_DECREMENT);
+# ;     while (lock_val != -LOCK_DECREMENT)
+# ;     {
+# ;         lock_val = load_dram_word(q_low + 20);
+# ;     }
+    add r4, r3, 20
+    and r5, r5, 0
+    add r5, r5, -8192
+    atomadd_d r15, r4, r5
+LOCKING_BULLSHIT_INSERT_EMERGENCY:
+    lw_d r9, r4, 0
+    bne r5, r9, LOCKING_BULLSHIT_INSERT_EMERGENCY, true
+    # uint32_t slots_base = q_low + 28
+    add r6, r3, 28              # r6 = slots_base
+
+    # uint32_t i = 0
+    and r8, r8, 0               # r8 = i = 0
+
+    # core_id = r15 >> 4
+    srl r9, r15, 4              # r9 = core_id
+    lw_d r4, r4, 4    # r4 = owner_count
+
+    sll r4, r4, 1
+    add r6, r6, r4
+    srl r12, r15, 4
+    # last_val = load_dram_half(last_slot_addr)
+    sh_d r12, r6, 0           # r12 = last_val
+
+    # atomic_add_dram(q_low + 24, -1)
+    add r10, r3, 24             # r10 = &core_owner_count
+    atomadd_d r12, r10, 1     # core_owner_count--
+    # atomic_add_dram(q_low + 20, LOCK_DECREMENT)
+    # rebuild LOCK_DECREMENT = 0x7FFFFFFF
+    add r10, r3, 20             # r10 = &lock
+    atomadd_d r12, r10, 8192     # release lock
+
+    # atomic_add_dram(q_low + 16, 1)
+    add r10, r3, 16             # r10 = &now_serving
+    and r5, r5, 0
+    add r5, r5, 1
+    atomadd_d r12, r10, r5     # advance now_serving
+
+    beq r15, r15, download_bvh_tree, true
+
+
+
+
+
+
+
+
+
+
 
 VERTEX_ARRAY_BASE:       .data 0
 SRAM_ALLOC_COUNT:       .data 0
