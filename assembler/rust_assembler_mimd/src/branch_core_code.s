@@ -858,13 +858,13 @@ loop_on_putting_tile_back:
     and r14, r14, 0
     bne r3, r14, loop_on_putting_tile_back, false
     # tile_y_index = self.tile_data_sram->tile_y_index  (offset 7 from struct base)
-    lbu r3, TILE_INTER_INDEX, 7          # r3 = tile_y_index
+    lw r3, TILE_INTER_INDEX_Y          # r3 = tile_y_index
     # tile_y_index *= 160
     and r4, r4, 0
     add r4, r4, 160
     mul r3, r3, r4                       # r3 = tile_y_index * 160
     # tile_x_index = self.tile_data_sram->tile_x_index  (offset 6 from struct base)
-    lbu r4, TILE_INTER_INDEX, 6          # r4 = tile_x_index
+    lw r4, TILE_INTER_INDEX_X          # r4 = tile_x_index
     # uint16_t tile_index = tile_y_index * 160 + tile_x_index
     add r3, r3, r4                       # r3 = tile_index
     # store_dram_half(tile_pool_low, tile_index)
@@ -911,7 +911,7 @@ SKIP_RETURNING_TILE:
     # uint32_t old_cnt = atomic_add(tile_pool_low, -1);
     atomadd_d r3, r2, -1
     # if (old_cnt <= 0) { atomic_add(tile_pool_low, 1); goto skip_grabbing_tile_rays; }
-    bg r3, r14, DONT_SKIP_GRABBING_TILE, false
+    bgt r3, r14, DONT_SKIP_GRABBING_TILE, false
     atomadd_d r3, r2, 1
     beq r15, r15, SKIP_GRABBING_TILE_RAYS, true
 DONT_SKIP_GRABBING_TILE:
@@ -957,10 +957,8 @@ WAIT_FOR_TILE_SLOT_TO_OPEN:
 
     # self.tile_data_sram->tile_x_index = tile_x_index;
     # self.tile_data_sram->tile_y_index = tile_y_index;
-    and r2, r2, 0
-    add r2, r2, TILE_INTER_INDEX         # r2 = base of tile_data_sram fields
-    sh r6, r2, 0                         # tile_x_index
-    sh r5, r2, 2                         # tile_y_index
+    sw r6, TILE_INTER_INDEX_X                         # tile_x_index
+    sw r5, TILE_INTER_INDEX_Y                         # tile_y_index
 
     # uint32_t zero = 0;
     # *(self.tile_data_sram->cur_ray_spawned_from_tile + 0) = zero;
@@ -1017,18 +1015,18 @@ WAIT_FOR_TILE_SLOT_TO_OPEN:
 ;     setctx 16                            # set_ctx(16)
 ;     relinquish false                         # relinquish_ownership(0)
 SPAWN_FROM_TILE:
-    AND r14, r14, 0                      # r14 = 0
+    and r14, r14, 0                      # r14 = 0
     add r2, r14, TILE_DATA_COUNT         # uint16_t tile_data_sram_address = &(self.tile_data_sram->count)
     atomadd r3, r2, 1                    # uint32_t ray_num_from_tile = atomic_add(tile_data_sram_address, 1)
     add r4, r14, 255                     # r4 = 255
     bgt r3, r4, GET_NEW_TILE, false      # if (ray_num_from_tile > 255) goto get_new_tile
-    add r2, r2, 28                       # tile_data_sram_address += 28 (point to rays_spawned counter)
+    add r2, r2, 40                       # tile_data_sram_address += 28 (point to rays_spawned counter)
     atomadd r15, r2, 1                   # atomic_add(tile_data_sram_address, 1) -- increment rays spawned
-    add r2, r2, -28                       # tile_data_sram_address -= 28 
+    add r2, r2, -40                       # tile_data_sram_address -= 28 
     and r4, r3, 0xF                      # uint32_t intra_tile_x = ray_num_from_tile & 0xF
     srl r5, r3, 4                        # uint32_t intra_tile_y = ray_num_from_tile >> 4
-    lhu r6, r2, 8                        # uint32_t inter_tile_x = *(self.tile_data_sram->tile_x_index)
-    lhu r7, r2, 10                       # uint32_t inter_tile_y = *(self.tile_data_sram->tile_y_index)
+    lw r6, TILE_INTER_INDEX_X                        # uint32_t inter_tile_x = *(self.tile_data_sram->tile_x_index)
+    lw r7, TILE_INTER_INDEX_Y                       # uint32_t inter_tile_y = *(self.tile_data_sram->tile_y_index)
     sll r6, r6, 4                        # inter_tile_x <<= 4
     sll r7, r7, 4                        # inter_tile_y <<= 4
     add r6, r6, r4                       # uint32_t pix_x = inter_tile_x + intra_tile_x
@@ -1048,9 +1046,13 @@ SPAWN_FROM_TILE:
     sw r5, r0, 0                         # ray->ox = cam_x  -- storing camera origin
     lw r6, CAM_Y                         # float cam_cy = *(self.cam_y)
     sw r6, r0, 4                         # ray->oy = cam_y
+    lw r6, CAM_Z                         # float cam_cy = *(self.cam_y)
+    sw r6, r0, 8                         # ray->oy = cam_y
+    lw r5, CAM_CX        # principal point x for direction calc
+    lw r6, CAM_CY        # principal point y
     lw r7, CAM_INV_FOCAL                 # float cam_inv_f = *(self.cam_inv_f)
-    fsub.32 r8, r3, r5                   # float dx = fpix_x - cam_cx
-    fsub.32 r9, r4, r6                   # float dy = fpix_y - cam_cy
+    fpsub.32 r8, r3, r5                   # float dx = fpix_x - cam_cx
+    fpsub.32 r9, r4, r6                   # float dy = fpix_y - cam_cy
     fpmul.32 r2, r8, r7                   # dx = dx * cam_inv_f
     fpmul.32 r3, r9, r7                   # dy = dy * cam_inv_f
     lw r4, NEG_ONE                       # float dz = -1.0f
@@ -1099,7 +1101,7 @@ SKIP_GRABBING_TILE_RAYS:
 # below is the final pass of the main loop, calculating the color of the final image
     getowner                             # get_thread_ownership()
     setctx 14                            # set_ctx(14)  -- differs: pseudocode uses 15
-    relinquish 1                         # relinquish_ownership(1)
+    relinquish true                         # relinquish_ownership(1)
     yield r15                            # yield()
     lw r0, RAY_RESULT_HIGH           # uint32_t pixel_addr_high = self.ray_result_addr_high
     setmembits r0                        # set_address_bits(pixel_addr_high)
@@ -1172,7 +1174,7 @@ SHADOW_SKIP:
     lw r11, r4, 20                       # r11 = sb
     lw r12, r4, 24                       # r12 = metallic
     lw r13, ONE                          # r13 = 1.0f
-    fsub r13, r13, r12                   # float inv_metallic = 1.0f - metallic
+    fpsub.32 r13, r13, r12                   # float inv_metallic = 1.0f - metallic
     fpmul.32 r6, r6, r9                   # float diffuse_r = acc_r * sr
     fpmul.32 r7, r7, r10                  # float diffuse_g = acc_g * sg
     fpmul.32 r8, r8, r11                  # float diffuse_b = acc_b * sb
@@ -1313,7 +1315,7 @@ COMPLETE_RAY: #Only register in use is r0. everything else is fair game.
     lbu r2, r0, 61                      # r2 = ray->light_id
     and r14, r14, 0                     # r14 = 0
     bne r2, r14, SHADOW_RAY, true       # if (ray->light_id != 0) goto shadow_ray
-    or r13, r13, 0xFFFFFFFF             # r13 = 0xFFFFFFFF
+    or r13, r13, 0xFFFF             # r13 = 0xFFFFFFFF
     lw r2, r0, 56                       # r2 = ray->tri_index
     bne r13, r2, RAY_HIT_A_TRI_IN_COMPLETE, true  # if (ray->tri_index != 0xFFFFFFFF) goto RAY_HIT_A_TRI_IN_COMPLETE
     sb r14, r0, 63                      # ray->active_ray = 0
@@ -1638,7 +1640,7 @@ SHADOW_RAY:
     sll r3, r2, 4                       # r3 = light_id << 4 (each shadow slot is 16 bytes)
     add r1, r1, r3                      # r1 = result_addr_low + shadow * 16 (advance to correct shadow slot)
     lw r4, r0, 56                       # r4 = ray->tri_index
-    or r13, r14, 0xFFFFFFFF             # r13 = 0xFFFFFFFF
+    or r13, r14, 0xFFFF             # r13 = 0xFFFFFFFF
     beq r13, r4, SHADOW_RAY_MUST_BE_CALCULATED, true  # if (ray->tri_index == 0xFFFFFFFF) ray missed, calc lighting
     # ray hit something - shadow is blocked, store 1.0 as len_sq sentinel
     lw r4, ONE                          # r4 = 0x3F800000 = 1.0f
@@ -1884,7 +1886,7 @@ ADD_IDLE_CORE:
     add r4, r4, r5                          # r4 = slot_addr = &slots + slot_offset
 IDLE_CORE_INSERT_SPINLOCK:
     lhu_d r5, r4, 2                         # r5 = is_valid = load_dram_half(slot_addr + offsetof(is_valid))
-    bne r14, r5, IDLE_CORE_INSERT_SPINLOCK  # spin until is_valid == 0 (slot is free)
+    bne r14, r5, IDLE_CORE_INSERT_SPINLOCK, false  # spin until is_valid == 0 (slot is free)
     srl r5, r15, 4                          # r5 = self.core_id = r15 >> 4 (strip thread_id bits)
     sh_d r5, r4, 0                          # store_dram_half(core_id, slot_addr + offsetof(core_id))
     add r5, r14, 1                          # r5 = 1
@@ -1894,11 +1896,11 @@ IDLE_CORE_INSERT_SPINLOCK:
 SEARCH_FOR_IDLE_CORES: #There's no documentation of who uses this function
 #I am going to assume that r3 has a return address
     and r14, r14, 0                     # r14 = 0 (zero register)
-    lw r5, IDLE_QUEUE_ADDRESS_HIGH      # r5 = self.idle_queue_address_high
+    lw r5, IDLE_QUEUE_HIGH      # r5 = self.idle_queue_address_high
     sw r5, SEARCH_FOR_IDLE_CORES_STORAGE # save idle_queue_address_high to scratch storage
     add r5, r14, DFS_STACK              # r5 = &DFS_STACK (dfs stack pointer)
     setmembits r5, r5                   # set_address_bits(DFS_STACK), r5 = old membits (discarded)
-    lw r6, IDLE_QUEUE_ADDRESS_LOW       # r6 = current = self.idle_queue_address_low
+    lw r6, IDLE_QUEUE_LOW       # r6 = current = self.idle_queue_address_low
     or r8, r8, 0xFFFF                   # r8 = 0xFFFFFFFF (found_core_id sentinel = not found)
     atomadd_d r9, r6, -1                # r9 = old_count = atomic_add_dram(current.count, -1)
     add r4, r6, 0                       # r4 = current (base addr of leaf idle_core_queue_dram)
@@ -1978,14 +1980,14 @@ SIBLING_EXHAUSTED:
     beq r15, r15, ASCEND, true         # unconditional goto ASCEND
 SEARCH_DONE:
     or r9, r9, 0xFFFF                   # r9 = 0xFFFFFFFF (sentinel value for comparison)
-    beq r9, r8, RAY_DONE, false        # if found_core_id == 0xFFFFFFFF (not found) goto RAY_DONE
+    beq r9, r8, ray_done, false        # if found_core_id == 0xFFFFFFFF (not found) goto RAY_DONE
     sendflit r15, r8, 34               # send_flit(self.thread_id, found_core_id, 34) (probe message)
     and r9, r15, 0xF                   # r9 = self.thread_id = r15 & 0xF
     add r9, r9, 16                     # r9 = 16 + self.thread_id (receive channel)
     block r9, r9                        # r9 = will_accept_change = blocking_recv(16 + self.thread_id)
     srl r11, r9, 24                     # r11 = will_accept_change >> 24 (response code)
     add r10, r14, 14                    # r10 = REJECT_CHANGE = 14
-    bne r11, r10, RAY_DONE, false      # if response == REJECT_CHANGE goto RAY_DONE
+    bne r11, r10, ray_done, false      # if response == REJECT_CHANGE goto RAY_DONE
     add r10, r14, 1                     # r10 = 1
     sendflit r10, r8, 0                # send_flit(1, found_core_id, 0) (acknowledge transfer)
     and r11, r9, 1                      # r11 = will_accept_change & 1 (target core type: 0=leaf, 1=branch)
@@ -2008,7 +2010,7 @@ TRANSFER_BRANCH_GEO_LOOP:
     sendflit r6, r8, 0                  # send_flit(word_to_transfer, found_core_id, 0)
     add r12, r12, 4                     # i += 4
     bne r5, r12, TRANSFER_BRANCH_GEO_LOOP, true # loop until end of geometry region
-    beq r15, r15, RAY_DONE, true       # unconditional goto RAY_DONE
+    beq r15, r15, ray_done, true       # unconditional goto RAY_DONE
 
 SWITCH_ROLES_INTERRUPT:
     add r4, r8, 0                           # r4 = return address (saved from r8 by caller convention)
@@ -2091,7 +2093,7 @@ RETURN_FROM_CORE_DRAM_QUEUE:
     lw r11, leaf_start_of_code             # r11 = leaf_start_of_code    
     beq r15, r15, DONE_LOADING_CODE, true
 EAT_BRANCH_START_OF_CODE:
-    lw r11, branch_start_of_code   
+    lw r11, BRANCH_START_OF_CODE   
     # r11 = starting_address
 DONE_LOADING_CODE:
     and r12, r12, 0
@@ -2111,12 +2113,12 @@ CORE_TYPE_BRANCH:
     # uint32_t starting_address = (type_of_core == 1) ? branch_start_of_geometry : leaf_start_of_geometry;
     add r11, r14, 1
     and r12, r12, 0
-    bne r10, r11, leaf_start_of_geometry, true
+    bne r10, r11, LEAF_START_OF_GEO, true
     lw r11, LEAF_START_OF_GEO              # r11 = leaf_start_of_geometry
-    add r12, r12, 5678 * 4
+    lw r12, LEAF_SIZE_OF_GEO
     beq r15, r15, DONE_LOADING_GEO, true
     lw r11, BRANCH_START_OF_GEO             # r11 = branch_start_of_geometry
-    add r12, r12, 8765 * 4
+    lw r12, BRANCH_SIZE_OF_GEO
 DONE_LOADING_GEO:
     # for (int i = 0; i < size_of_geo; i += 4)
     and r14, r14, 0             # 0
@@ -2137,8 +2139,8 @@ RETURN_FROM_INSERT_DRAM_QUEUE:
     lw r10, IS_BRANCH_CORE
     and r14, r14, 0
     add r11, r14, 1
-    beq r10, r11, VERTEX_COPY_DONE, true # if type_of_core == 1 (branch core) goto SWITCH_ROLES_INTERRUPT_DONE
-    beq r15, r15, VERTEX_COPY_DONE_BUT_LEAF, true
+    beq r10, r11, 1234, true # if type_of_core == 1 (branch core) goto SWITCH_ROLES_INTERRUPT_DONE
+    beq r15, r15, 4321, true
 
 download_bvh_tree:
     # NOTE:
@@ -2344,7 +2346,7 @@ queue_loop_2_done:
     sw r14, LOCAL_QUEUE_FLUSHING
 
     # *(self.tile_data_sram + 4) = 0;
-    lw r1, TILE_DATA_SRAM
+    lw r1, TILE_DATA_COUNT
     sw r14, r1, 4
 
     # *(self.ray_send_pending_addr) = 0;
@@ -2352,7 +2354,7 @@ queue_loop_2_done:
 
 
     # ray_base = self.ray_array_base;
-    lw r1, RAY_ARRAY_BASE
+    lw r1, RAY_ARRAY
 
     # ray_array_index = self.thread_id << 6;
     sll r2, r15, 6
@@ -2383,7 +2385,7 @@ queue_loop_2_done:
     intena 35
     intena 36
     relinquish true
-    beq r15, r15, grab_from_tile, true
+    beq r15, r15, GRAB_FROM_TILE, true
 
 
 
@@ -2677,15 +2679,16 @@ LOCKING_BULLSHIT_INSERT_EMERGENCY:
     beq r15, r15, download_bvh_tree, true
 
 
-
-
-
-
-
-
-
-
-
+NODE_ID_TABLE_HIGH:
+.data -1
+NODE_ID_TABLE_LOW:
+.data -1
+LEAF_SIZE_OF_GEO:
+.data 6789
+LEAF_START_OF_GEO:
+.data 6789
+leaf_start_of_code:
+.data 5678
 VERTEX_ARRAY_BASE:       
 .data 0
 SRAM_ALLOC_COUNT:       
@@ -2810,7 +2813,8 @@ DIV_TABLE_LOW:
 .data -1
 INV_SQRT_TABLE_HIGH: 
 .data -1
-INV_SQRT_TABLE_LOW: .data -1
+INV_SQRT_TABLE_LOW: 
+.data -1
 IDLE_QUEUE_HIGH: 
 .data -1
 IDLE_QUEUE_LOW: 
@@ -2845,8 +2849,10 @@ TILE_X_INDEX:
 .data 0
 TILE_Y_INDEX:
 .data 0
-TILE_INTER_INDEX: 
-.data 0 #tile_x_index/tile_y_index
+TILE_INTER_INDEX_X: 
+.data 0 
+TILE_INTER_INDEX_Y:
+.data 0
 TILE_CUR_RAY_SPAWNED:
 .data 0 #cur_ray_spawned_from_tile[16] in bytes
 .data 0 
