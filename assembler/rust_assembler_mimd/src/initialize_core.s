@@ -52,7 +52,7 @@ INITIALIZE_CORE:
     sw r3, RAY_QUEUE_LOW
     lw r4, IS_BRANCH_CORE
     and r0, r0, 0
-    bne r4, r0, download_branch_core_code, true
+    beq r4, r0, download_leaf_core_code, true
 
     # uint32_t r1 = self.num_instructions_branch;
     lw r1, num_instructions_branch
@@ -70,7 +70,7 @@ INITIALIZE_CORE:
     beq r15, r15, bootloader_reuse, true
 
     # uint32_t r1 = self.num_instructions_leaf;
-download_branch_core_code:
+download_leaf_core_code:
     lw r1, num_instructions_leaf     # r1 = num_instructions_leaf
 
     # uint32_t r2 = self.leaf_addr_high;
