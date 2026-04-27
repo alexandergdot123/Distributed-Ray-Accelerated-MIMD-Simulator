@@ -12,6 +12,8 @@
     .data -1
     ROOT_NODE_ID:           
     .data -1
+    NODE_INDEX_OF_ROOT:
+    .data -1
 INITIALIZE_CORE:
     lw r0, dram_queue_array_high    
 
@@ -26,9 +28,14 @@ INITIALIZE_CORE:
     # uint32_t dram_queue_high = load_dram_word(dram_queue_array_address);
     lw_d r2, r1, 0                       # r2 = node_id
     lw_d r3, r1, 4 #r3 = is_branch_core
+    srl r4, r3, 31
+
     sw r2, ROOT_NODE_ID
     # uint32_t dram_queue_low = load_dram_word(dram_queue_array_address + 4);
-    sw r3, IS_BRANCH_CORE
+    sw r4, IS_BRANCH_CORE
+    lw r4, AND_MASK
+    and r4, r4, r3
+    sw r4, NODE_INDEX_OF_ROOT
     lw r0, dram_queue_addresses_high    
 
     setmembits r0   
@@ -101,3 +108,5 @@ leaf_addr_high:
     .data 0   
 leaf_addr_low:
     .data 10000   
+AND_MASK:
+    .data 0x7FFFFFFF

@@ -12,6 +12,8 @@
     .data -1
     ROOT_NODE_ID:           
     .data -1
+    NODE_INDEX_OF_ROOT:
+    .data -1
 SWITCH_DRAM_QUEUE:
     lw r12, NODE_ID_TABLE_HIGH
     setmembits r12
@@ -1396,9 +1398,9 @@ BOUNCE_DONE: //Label not used lol
     add r0, r0, r13                      # pixel_addr_low += stride (advance to next pixel in result buffer)
     and r14, r14, 0                      # r14 = 0
     add r14, r14, 30                     # r14 = 30 (max pixels per core per pass)
-    lw r13, RAY_RESULT_HIGH         # uint32_t finished_pixel_high = self.finished_pixel_high
+    lw r13, PIXEL_DONE_HIGH         # uint32_t finished_pixel_high = self.finished_pixel_high
     setmembits r13                       # set_address_bits(finished_pixel_high)
-    lw r13, RAY_RESULT_LOW          # uint32_t finished_pixel_low = self.finished_pixel_low
+    lw r13, PIXEL_DONE_LOW          # uint32_t finished_pixel_low = self.finished_pixel_low
     atomadd_d r13, r13, 1               # atomic_add_dram(finished_pixel_low, 1)
     bgt r14, r1, LOOP_PIXEL, true        # if (pix_loop_counter < 30) goto loop_pixel
 
@@ -1824,11 +1826,6 @@ RECEIVE_RAY_DATA:
 
 
 download_bvh_tree:
-    # NOTE:
-    # The current C snippet has two real problems:
-    #   1) the root push in the C is inconsistent with the stack growth direction
-    #   2) the recurse logic has an unconditional goto that makes the owner checks bogus
-    # This assembly follows the intended behavior, not those broken lines literally.
 
     and r14, r14, 0                          # r14 = 0
 
@@ -1844,8 +1841,19 @@ download_bvh_tree:
     add r2, r14, DFS_STACK                   # r2 = stack_top
 
     # -- push root onto stack --
-    sw r14, r2, 0                            # dram_idx = 0
-    add r11, r14, 0xFFFF
+    lw r9, NODE_INDEX_OF_ROOT
+    or r11, r11, 0xFFFF
+FIND_BRANCH_NODE:
+    mul r9, r9, 48
+    add r9, r9, r12
+    lw_d r10, r9, 36
+    beq r11, r10, FOUND_BRANCH_CORE_NODE, false
+    lw_d r9, r9, 28                        # parent index
+    beq r15, r15, FIND_BRANCH_NODE, true
+FOUND_BRANCH_CORE_NODE:
+
+    sw r10, r2, 0                            # dram_idx = 0
+    or r11, r14, 0xFFFF
     sh r11, r2, 4                            # parent_ptr = 0xFFFF (null sentinel)
     sh r14, r2, 6                            # patch_left = 0
     sh r14, r2, 8                            # patch_right = 0
@@ -1943,9 +1951,8 @@ SET_NODE_ID:
 DO_RECURSE:
     # -- push right child first (so left is processed first) --
     and r14, r14, 0
-    lw_d r10, r12, 24                        # right_idx
-    lw_d r11, r12, 28                        # left_idx
-
+    lw_d r11, r12, 24                        # left index
+    add r10, r11, 1                          #right index
     add r12, r9, 1                           # child_depth = depth + 1
 
     sw r10, r2, 0                            # right_idx
@@ -2384,6 +2391,10 @@ RAYS_COMPLETED_HIGH:
 .data 0
 RAYS_COMPLETED_LOW: 
 .data 168000000
+PIXEL_DONE_HIGH:
+.data 0
+PIXEL_DONE_LOW:
+.data 168_000_004
 //DO NOT INCLUDE LINES BELOW THIS AS PULLED FROM DRAM
 RAY_ARRAY: 
 .data(256) 0

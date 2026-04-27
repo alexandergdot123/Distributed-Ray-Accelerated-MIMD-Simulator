@@ -14,7 +14,7 @@ use rand::{Rng, SeedableRng};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Barrier};
-use std::thread;
+use std::{io, thread};
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::write_npy;
@@ -662,7 +662,7 @@ fn main() {
         let (x, y, node_id) = placement_vec[i];
         let index = y * 128 + x;
         stacks[0].dram_stack[2* index as usize + start_of_node_init_table] = node_id_hash_map.get(&node_id).unwrap().0 as u32;
-        stacks[0].dram_stack[2* index as usize + start_of_node_init_table + 1] = node_id_hash_map.get(&node_id).unwrap().1;
+        stacks[0].dram_stack[2* index as usize + start_of_node_init_table + 1] = (node_id_hash_map.get(&node_id).unwrap().1 << 31) | node_id;
     }
 
     let start_of_random_table = 60_000_004 / 4;
@@ -753,16 +753,35 @@ fn main() {
     let mut handles = Vec::new();
     let done = Arc::new(AtomicBool::new(false));
 
+    print!("Enter cores to watch (0-8191, comma/space separated): ");
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+
+    let cores_to_watch: Vec<u32> = input
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<u32>().ok())
+        .filter(|&n| n <= 8191)
+        .collect();
+
+    print!("Enter core to inspect (0-15, or Enter to skip): ");
+    io::stdin().read_line(&mut input).unwrap();
+    let context_to_watch = match input.trim() {
+        "" => -1,
+        s => s.parse::<i32>().ok().filter(|&n| (0..=15).contains(&n)).unwrap_or(-1),
+    };
+
     for (stack_num, mut stack) in stacks.into_iter().enumerate() {
         let barrier = barrier.clone();
         let done_per_thread = done.clone();
+        let cores_to_monitor = cores_to_watch.clone();
         let handle = thread::spawn(move || -> Option<StackLog> {
-            let mut result_val: usize = 0;
             for cycle in 0..1500 * 1000 * 16 {
                 let mut local_read = 0;
                 let mut local_write = 0;
                 for core in stack.cores.iter_mut() {
-                    core.tick(&mut stack.dram_stack);
+                    core.tick(&mut stack.dram_stack, &cores_to_monitor, &context_to_watch);
                     local_read += core.get_local_read();
                     local_write += core.get_local_write();
                 }
@@ -785,30 +804,13 @@ fn main() {
                     println!("Finished Cycle {}", cycle);
                 }
 
-                if cycle == 999999 {
-                    println!("SIM TOOK TOO LONG");
-                    std::process::exit(1);
-                }
+                // if cycle == 999999 {
+                //     println!("SIM TOOK TOO LONG");
+                //     std::process::exit(1);
+                // }
                 if stack_num == 0 {
-                    while result_val < 4096
-                        && f16::from_bits(dram_read_unsigned_half(
-                            &stack.dram_stack,
-                            256 * 256 * 256 + result_val * 2,
-                        ) as u16)
-                            - f16::from_bits(MAT_C[result_val])
-                            < f16::from_f32(1.5)
-                        && f16::from_bits(dram_read_unsigned_half(
-                            &stack.dram_stack,
-                            256 * 256 * 256 + result_val * 2,
-                        ) as u16)
-                            - f16::from_bits(MAT_C[result_val])
-                            > f16::from_f32(-1.5)
-                    {
-                        println!("Completed value {}", result_val);
-                        result_val += 1;
-                    }
-                    if result_val == 4096 {
-                        println!("WE CALCULATED THE MATRIX!!!");
+                    if dram_read_word(&stack.dram_stack, 168_000_004/4) == 2560 * 1440 * 16 {
+                        println!("WE RENDERED THE SCENE!!!");
                         println!(
                             "Local Read: {}, Local write: {}, foreign read: {}, foreign write: {}",
                             stack.local_read,

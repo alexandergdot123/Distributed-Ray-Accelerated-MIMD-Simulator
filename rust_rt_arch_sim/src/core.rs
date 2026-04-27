@@ -1499,7 +1499,7 @@ impl Core {
         }
     }
 
-    pub fn tick(&mut self, dram: &mut Vec<u32>) {
+    pub fn tick(&mut self, dram: &mut Vec<u32>, cores_to_monitor: &Vec<u32>, context_to_monitor: &i32) {
         while self.fp_pipe.peek().is_some()
             && self.fp_pipe.peek().unwrap().cycle_to_read <= self.cycle
         {
@@ -1612,7 +1612,13 @@ impl Core {
             );
 
             if !switch_ctx {
-                if DEBUG && self.core_id == 64 * 63 + 63 {
+                let mut core_in_list = false;
+                for i in cores_to_monitor{
+                    if self.core_id == *i{
+                        core_in_list = true;
+                    }
+                }
+                if DEBUG && core_in_list && (*context_to_monitor == self.context_in_progress as i32 || *context_to_monitor < 0) {
                     println!(
                         "Core {} executing instruction x{:08X} ({:?}) at PC {:08X} in context {} at cycle {}, dr: {}, sr1: {}, sr1_val: {}, is_imm: {}, sr2: {}, sr2_val: {},imm_val: {}",
                         self.core_id,

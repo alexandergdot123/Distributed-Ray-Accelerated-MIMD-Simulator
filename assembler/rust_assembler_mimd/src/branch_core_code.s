@@ -12,6 +12,8 @@
     .data -1
     ROOT_NODE_ID:           
     .data -1
+    NODE_INDEX_OF_ROOT:
+    .data -1
 SWITCH_DRAM_QUEUE:
     lw r12, NODE_ID_TABLE_HIGH
     setmembits r12
@@ -1683,9 +1685,9 @@ BOUNCE_DONE: //Label not used lol
     add r0, r0, r13                      # pixel_addr_low += stride (advance to next pixel in result buffer)
     and r14, r14, 0                      # r14 = 0
     add r14, r14, 30                     # r14 = 30 (max pixels per core per pass)
-    lw r13, RAY_RESULT_HIGH         # uint32_t finished_pixel_high = self.finished_pixel_high
+    lw r13, PIXEL_DONE_HIGH         # uint32_t finished_pixel_high = self.finished_pixel_high
     setmembits r13                       # set_address_bits(finished_pixel_high)
-    lw r13, RAY_RESULT_LOW          # uint32_t finished_pixel_low = self.finished_pixel_low
+    lw r13, PIXEL_DONE_LOW          # uint32_t finished_pixel_low = self.finished_pixel_low
     atomadd_d r13, r13, 1               # atomic_add_dram(finished_pixel_low, 1)
     bgt r14, r1, LOOP_PIXEL, true        # if (pix_loop_counter < 30) goto loop_pixel
 
@@ -2801,6 +2803,10 @@ TILE_QUEUE_HIGH:
 .data -1
 TILE_QUEUE_LOW: 
 .data -1
+PIXEL_DONE_HIGH:
+.data 0
+PIXEL_DONE_LOW:
+.data 168_000_004
 RAY_RESULT_HIGH: 
 .data -1
 RAY_RESULT_LOW: 
