@@ -712,6 +712,217 @@ pub fn load_bvh_nodes() -> Vec<BvhNode> {
     nodes
 }
 
+const WELD_EPSILON: f32 = 1e-6;
+
+#[derive(Debug, Clone)]
+struct BvhLeaf {
+    first_tri: usize,
+    tri_count: usize,
+}
+type TriangleVertices = [f32; 9];
+
+fn walk(
+    node_id:   usize,
+    nodes:     &Vec<BvhNode>,
+    leaves:    &Vec<BvhLeaf>,
+    triangles: &[TriangleVertices],
+    out:       &mut Vec<TriangleVertices>,
+) {
+    let node = &nodes[node_id];
+
+    if node.tri_count > 0 {
+        // ---- True leaf: left_first IS the bvh_leaves node_id to look up.
+        // The current node's tri_count tells us how many triangles to expect,
+        // but the actual firstTri offset lives in bvh_leaves under left_first.
+        // e.g. node 15 has left_first=71, tri_count=1 → look up node 71 in
+        // bvh_leaves to find where in bvh_triangles to read from.
+        let leaf_id = node.left_first;
+        let leaf = &leaves[leaf_id as usize];
+
+        // Collect leaf.tri_count consecutive triangles starting at leaf.first_tri
+        let end = leaf.first_tri + leaf.tri_count;
+        if end > triangles.len() {
+            eprintln!(
+                "Warning: leaf {} requests tris {}..{} but only {} exist",
+                leaf_id, leaf.first_tri, end, triangles.len()
+            );
+            return;
+        }
+        out.extend_from_slice(&triangles[leaf.first_tri..end]);
+        return;
+    }
+
+    // ---- Internal node: recurse into both children ----
+    let left  = node.left_first;
+    let right = node.left_first + 1;
+    walk(left as usize,  nodes, leaves, triangles, out);
+    walk(right as usize, nodes, leaves, triangles, out);
+}
+
+// A triangle is three vertices, each with x/y/z → 9 floats.
+/// Build an indexed mesh for the subtree rooted at `node_id`.
+///
+/// - Walks all descendant leaves left-to-right (same order as `walk`).
+/// - Dedupes vertices by quantizing to WELD_EPSILON.
+/// - Emits 3 indices per triangle in traversal order.
+fn indexed_mesh_for_node(
+    node_id:   usize,
+    nodes:     &Vec<BvhNode>,
+    leaves:    &Vec<BvhLeaf>,
+    triangles: &[TriangleVertices],
+) -> (Vec<(u32, u16, u16, u16)>, Vec<[f32; 3]>) {
+
+    // Gather all triangles under this subtree, in left-to-right leaf order.
+    let mut tris: Vec<TriangleVertices> = Vec::new();
+    walk(node_id, nodes, leaves, triangles, &mut tris);
+
+    let inv_eps = 1.0 / WELD_EPSILON;
+    let quantize = |x: f32| -> i32 { (x * inv_eps).round() as i32 };
+
+    let mut vertex_map: HashMap<[i32; 3], u32>           = HashMap::new();
+    let mut vertices:   Vec<[f32; 3]>                    = Vec::new();
+    let mut indices:    Vec<(u32, u16, u16, u16)>        = Vec::with_capacity(tris.len());
+
+    for (tri_num, tri) in tris.iter().enumerate() {
+        // Three corner indices for this triangle.
+        let mut corner_idx: [u16; 3] = [0; 3];
+
+        for v in 0..3 {
+            let pos: [f32; 3] = [tri[v * 3], tri[v * 3 + 1], tri[v * 3 + 2]];
+            let key: [i32; 3] = [quantize(pos[0]), quantize(pos[1]), quantize(pos[2])];
+
+            let idx = match vertex_map.get(&key) {
+                Some(&i) => i,
+                None => {
+                    let i = vertices.len() as u32;
+                    vertices.push(pos);
+                    vertex_map.insert(key, i);
+                    i
+                }
+            };
+
+            if idx > u16::MAX as u32 {
+                panic!("vertex index {} exceeds u16 range", idx);
+            }
+            corner_idx[v] = idx as u16;
+        }
+
+        indices.push((tri_num as u32, corner_idx[0], corner_idx[1], corner_idx[2]));
+    }
+
+    (indices, vertices)
+}
+
+
+
+use std::fs;
+
+fn parse_bvh_nodes(path: &str) -> Vec<BvhNode> {
+    let content = fs::read_to_string(path).expect("failed to read bvh_nodes.txt");
+    let mut nodes = Vec::new();
+
+    for (line_no, line) in content.lines().enumerate() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        // Format (8 fields, position-indexed; node_id is the line index):
+        //   min.x min.y min.z  max.x max.y max.z  left_first  tri_count
+        //   [0]   [1]   [2]    [3]   [4]   [5]    [6]         [7]
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 8 {
+            panic!("bvh_nodes.txt line {}: expected 8 fields, got {}", line_no, parts.len());
+        }
+
+        nodes.push(BvhNode {
+            min_x:      parts[0].parse().unwrap(),
+            min_y:      parts[1].parse().unwrap(),
+            min_z:      parts[2].parse().unwrap(),
+            max_x:      parts[3].parse().unwrap(),
+            max_y:      parts[4].parse().unwrap(),
+            max_z:      parts[5].parse().unwrap(),
+            left_first: parts[6].parse().unwrap(),
+            tri_count:  parts[7].parse().unwrap(),
+            parent:     0,  // filled in below
+        });
+    }
+
+    // ---- Backfill parent pointers ----
+    // For every internal node (tri_count == 0), its two children are at
+    // left_first and left_first+1. Mark each child's parent as that node.
+    // Root's parent stays 0 (or you can use u32::MAX as a sentinel — see note).
+    let n = nodes.len();
+    for i in 0..n {
+        if nodes[i].tri_count == 0 {
+            let l = nodes[i].left_first as usize;
+            let r = l + 1;
+            if l < n { nodes[l].parent = i as u32; }
+            if r < n { nodes[r].parent = i as u32; }
+        }
+    }
+
+    nodes
+}
+
+fn parse_bvh_leaves(path: &str) -> Vec<BvhLeaf> {
+    let content = fs::read_to_string(path).expect("failed to read bvh_leaves.txt");
+
+    // The leaf file is sparse: it has lines like "13 27 5", "15 24 1", etc.
+    // The first column is the leaf_id, which can have gaps. We need a Vec
+    // indexed by leaf_id, so we size it to (max_id + 1) and fill the rest
+    // with zero entries that will never be looked up.
+    let mut entries: Vec<(usize, BvhLeaf)> = Vec::new();
+    let mut max_id: usize = 0;
+
+    for (line_no, line) in content.lines().enumerate() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        // Format: leaf_id  first_tri  tri_count
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            panic!("bvh_leaves.txt line {}: expected 3 fields, got {}", line_no, parts.len());
+        }
+        let leaf_id:   usize = parts[0].parse().unwrap();
+        let first_tri: usize = parts[1].parse().unwrap();
+        let tri_count: usize = parts[2].parse().unwrap();
+
+        if leaf_id > max_id { max_id = leaf_id; }
+        entries.push((leaf_id, BvhLeaf { first_tri, tri_count }));
+    }
+
+    let mut leaves: Vec<BvhLeaf> =
+        vec![BvhLeaf { first_tri: 0, tri_count: 0 }; max_id + 1];
+    for (id, leaf) in entries {
+        leaves[id] = leaf;
+    }
+    leaves
+}
+
+fn parse_triangles(path: &str) -> Vec<TriangleVertices> {
+    let content = fs::read_to_string(path).expect("failed to read bvh_triangles.txt");
+    let mut tris = Vec::new();
+
+    for (line_no, line) in content.lines().enumerate() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        // Format: 9 floats (v0.xyz, v1.xyz, v2.xyz). No leading id column —
+        // the triangle's index is just its position in the file.
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 {
+            panic!("bvh_triangles.txt line {}: expected 9 fields, got {}", line_no, parts.len());
+        }
+        let mut vals = [0f32; 9];
+        for i in 0..9 {
+            vals[i] = parts[i].parse().unwrap();
+        }
+        tris.push(vals);
+    }
+    tris
+}
+
+
+
 
 fn main() {
     // assemble_tree("bvh_data".to_string());
@@ -791,6 +1002,39 @@ fn main() {
         ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32] += 64 * 1024;
     }
 
+
+    let tri_vec = parse_triangles("bvh_triangles.txt");
+    let node_vec = parse_bvh_nodes("bvh_nodes.txt");
+    let leaf_vec = parse_bvh_leaves("bvh_leaves.txt");
+    for (_, _, node_id, is_branch) in &node_id_vec {
+        if *is_branch != 0{
+            continue;
+        }
+        let i = node_id_hash_map.get(node_id).unwrap().0;
+        let address = address_ray_queue_hash_map.get(&i).unwrap();
+        let (indices, vertices) = indexed_mesh_for_node(*node_id as usize, &node_vec, &leaf_vec, &tri_vec);
+        let stack_num = address >> 31 ;
+        let intra_stack_addr = address & 0x7FFF_FFFF;
+        let mut address_inc = 8 + 32612;
+        dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc - 8, indices.len() as u32 * 12);
+        dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc - 4, vertices.len() as u32 * 12);
+
+        for index_set in indices{
+            dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc, index_set.0);
+            dram_store_half(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc + 4, index_set.1 as u32);
+            dram_store_half(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc + 6, index_set.2 as u32);
+            dram_store_half(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc + 8, index_set.3 as u32);
+
+            address_inc+=12;
+        }
+        for vertex in vertices {
+            for float in vertex{
+                dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc, float.to_bits());
+                address_inc+=4;
+
+            }
+        }
+    }
 
     let start_of_node_init_table = 20_000 / 4;
 
