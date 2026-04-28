@@ -804,10 +804,11 @@ fn main() {
 
 
     for i in 0..node_id_vec.len(){
-        let (_x, _y, node_id, _is_branch) = node_id_vec[i];
+        let (_x, _y, node_id, is_branch) = node_id_vec[i];
         let address = node_id_hash_map.get(&node_id).unwrap().0;
         stacks[1].dram_stack[12 * node_id as usize + 9 + node_array_start] = address as u32;
         dram_store_half(&mut stacks[1].dram_stack, 4*(12 * node_id as usize + node_array_start) + 40, (address >> 32) as u32);
+        dram_store_half(&mut stacks[1].dram_stack, 4*(12 * node_id as usize + node_array_start) + 42, is_branch);
         stacks[1].dram_stack[12 * node_id as usize + 11 + node_array_start] = node_id_hash_map.get(&node_id).unwrap().1;
     }
 

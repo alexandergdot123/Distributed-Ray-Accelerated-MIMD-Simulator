@@ -574,7 +574,7 @@ IS_INTERNAL_NODE:
     beq r6, r7, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
 
     # uint16_t ray_send_pending_addr = self.ray_send_pending_addr;
-    lhu r8, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
+    add r8, r14, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
 
     # atomic_add(ray_send_pending_addr, 1)
     atomadd r9, r8, 1               # r9 = clobber
@@ -811,7 +811,7 @@ CHECK_INTERRUPT_MAILBOX:
     lw r9, ROOT_NODE_ID             # r9 = self.root_node_id
     bne r8, r9, WRONG_CORE_SEND, true   # node mismatch -> wrong core
 
-    lw r8, LOCAL_QUEUE              # r8 = self.local_queue
+    add r8, r14, LOCAL_RAY_QUEUE              # r8 = self.local_queue
     add r8, r8, 8                   # r8 = skip head and tail
     and r9, r10, 1                  # r9 = thread_id & 1
     and r11, r11, 0
@@ -888,7 +888,7 @@ DECREMENT_PENDING:
     and r11, r10, 1                 # r11 = thread_id & 1
     add r11, r11, 32                # r11 = interrupt mailbox index
     intdis r11                      # disable interrupts
-    lw r8, RAY_SEND_PENDING_ADDR    # r8 = &ray_send_pending
+    add r8, r14, RAY_SEND_PENDING_ADDR    # r8 = &ray_send_pending
     atomadd r9, r8, -1              # decrement pending count
     beq r15, r15, ray_done, true
 
@@ -2199,9 +2199,9 @@ CONTINUE_WITH_EAT_RAY_INTERRUPT:
     lw r8, EAT_RAY_MASK                     # r8 = EAT_RAY_MASK (isolates core_id field)
     and r8, r7, r8                          # r8 = core_id = flit & EAT_RAY_MASK
     srl r13, r7, 17                         # r13 = node_id = flit >> 17
-    lw r9, ROOT_NODE_ID_SENDER              # r9 = self.node_id (sender side)
+    lw r9, ROOT_NODE_ID              # r9 = self.node_id (sender side)
     beq r13, r9, NODE_IDS_MATCH, true      # if node_id == sender_node_id goto NODE_IDS_MATCH
-    lw r9, ROOT_NODE_ID_RECEIVER            # r9 = self.node_id (receiver side)
+    add r9, r9, 8192
     beq r13, r9, NODE_IDS_MATCH, true      # if node_id == receiver_node_id goto NODE_IDS_MATCH
 reject_ray_interrupt:
     add r10, r14, 8                         # r10 = wrong_core = 8 (reject code)
@@ -2477,10 +2477,6 @@ download_bvh_tree:
 
     and r14, r14, 0                          # r14 = 0
 
-    # *(self.sram_alloc_count) = self.node_array_top;
-    lw r11, NODE_ARRAY_TOP
-    sw r11, SRAM_ALLOC_COUNT
-
     # set_address_bits(self.node_array_high);
     lw r12, NODE_ARRAY_HIGH
     setmembits r11, r12                      # r11 = old membits (ignored), membits = node_array_high
@@ -2514,7 +2510,7 @@ dfs_loop:
     lhu r8, r2, 10                           # is_right
     lw r9, r2, 12                            # depth
 
-    lw r10, SRAM_NODE_ALLOC_PTR              # address of alloc pointer / next free slot
+    add r10, r14, SRAM_NODE_ALLOC_PTR              # address of alloc pointer / next free slot
     atomadd r13, r10, 48                     # r13 = node = atomic_add(sram_slot_address, 48)
 
     lw r12, NODE_ARRAY_LOW                   # r12 = bottom_node_bits base
@@ -2722,21 +2718,17 @@ queue_loop_2_done:
 
 
 NODE_ID_TABLE_HIGH:
-.data -1
+.data 0
 NODE_ID_TABLE_LOW:
-.data -1
+.data 63070000
 LEAF_SIZE_OF_GEO:
 .data 6789
 LEAF_START_OF_GEO:
 .data 6789
 leaf_start_of_code:
 .data 5678
-VERTEX_ARRAY_BASE:       
-.data 0
 SRAM_NODE_ALLOC_PTR:     
-.data 0
-NODE_ARRAY_TOP:         
-.data 0
+.data 16384
 BRANCH_START_OF_CODE:    
 .data -1
 BRANCH_NUM_INSTRUCTION_BYTES: 
@@ -2745,14 +2737,8 @@ BRANCH_START_OF_GEO:
 .data -1
 BRANCH_SIZE_OF_GEO:      
 .data -1
-SAVED_BRANCH_HIGH:       
-.data -1
-SAVED_BRANCH_LOW:        
-.data -1
-SEARCH_FOR_IDLE_CORES_STORAGE: 
-.data -1
 BRANCH_IDLE_THRESHOLD:    
-.data -1
+.data 5
 IDLE_WINDOW:             
 .data 100000
 EAT_RAY_MASK:            
@@ -2785,70 +2771,64 @@ SPAWNED_RAY_POOL_MASK:
 .data 0x007FFFFF
 RAY_SEND_PENDING_ADDR:  
 .data 0
-LOCAL_QUEUE:            
-.data 0
 LOCAL_QUEUE_FLUSHING:   
 .data 0
-ROOT_NODE_ID_SENDER:    
-.data -1
-ROOT_NODE_ID_RECEIVER:  
-.data -1
 EMERGENCY_QUEUE_HIGH: 
-.data -1
+.data 0
 EMERGENCY_QUEUE_LOW: 
-.data -1
+.data 62000000
 SPAWNED_RAY_POOL_HIGH: 
-.data -1
+.data 0
 SPAWNED_RAY_POOL_LOW: 
-.data -1
+.data 2250000000
 TILE_QUEUE_HIGH: 
-.data -1
+.data 0
 TILE_QUEUE_LOW: 
-.data -1
+.data 62001000
 PIXEL_DONE_HIGH:
 .data 0
 PIXEL_DONE_LOW:
-.data 168_000_004
+.data 168000004
 RAY_RESULT_HIGH: 
-.data -1
+.data 0
 RAY_RESULT_LOW: 
-.data -1
+.data 170000000
 RAYS_COMPLETED_HIGH: 
-.data -1
+.data 0
 RAYS_COMPLETED_LOW: 
-.data -1
+.data 168000000
 FRAME_BUF_HIGH: 
-.data -1
+.data 0
 FRAME_BUF_LOW: 
-.data -1
+.data 200000
 NODE_ARRAY_HIGH: 
-.data -1
+.data 0
 NODE_ARRAY_LOW: 
-.data -1
+.data 2147483648
 TRIANGLE_ARRAY_HIGH: 
-.data -1
+.data 0
 TRIANGLE_ARRAY_LOW: 
-.data -1
+.data 100000000
 INT_TO_FLOAT_TABLE_HIGH: 
-.data -1
+.data 0
 INT_TO_FLOAT_TABLE_LOW: 
-.data -1
+.data 150000
 DIV_TABLE_HIGH: 
-.data -1
+.data 0
 DIV_TABLE_LOW: 
-.data -1
+.data 61000000
 INV_SQRT_TABLE_HIGH: 
-.data -1
+.data 0
 INV_SQRT_TABLE_LOW: 
-.data -1
+.data 100000
 IDLE_QUEUE_HIGH: 
-.data -1
+.data 0
 IDLE_QUEUE_LOW: 
-.data -1
+.data 2500000000
 RANDOM_TABLE_HIGH: 
-.data -1
+.data 0
 RANDOM_TABLE_LOW: 
-.data -1
+.data 60000000
 CAM_X: 
 .data -1
 CAM_Y: 
@@ -2862,9 +2842,9 @@ CAM_CY:
 CAM_INV_FOCAL: 
 .data -1
 RAY_SEND_PENDING: 
-.data -1
+.data 0
 PULLED_FROM_FULL_QUEUE_CNT: 
-.data -1
+.data 0
 CORE_ID_TO_SWITCH_TO: 
 .data -1
 TILE_DATA_COUNT: 
@@ -2932,6 +2912,10 @@ LIGHT2_G:
 .data -1
 LIGHT2_B: 
 .data -1
+SRAM_ALLOC_COUNT:       
+.data 16384
+ROOT_NODE_ADDRESS: 
+.data 16384
 //DO NOT INCLUDE LINES BELOW THIS AS PULLED FROM DRAM
 RAY_ARRAY: 
 .data(256) 0
@@ -2941,7 +2925,9 @@ LOCAL_RAY_QUEUE:
 .data(1048) 0
 DFS_STACK: 
 .data(256) 0
-SRAM_ALLOC_COUNT:       
-.data 0
-ROOT_NODE_ADDRESS: 
-.data 0
+SAVED_BRANCH_HIGH:       
+.data -1
+SAVED_BRANCH_LOW:        
+.data -1
+SEARCH_FOR_IDLE_CORES_STORAGE: 
+.data -1

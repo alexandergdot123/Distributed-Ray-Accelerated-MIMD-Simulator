@@ -817,6 +817,7 @@ CHECK_DATA_MAILBOX:
     sw r11, r4, 60
     add r11, r7, 1
     sb r11, r4, 63
+    lw r1, ROOT_NODE_ADDRESS
 CHECK_INTERRUPT_MAILBOX:
     nonblock r11, 32
     beq r11, r7, SKIP_INTERRUPT_MAILBOX, true
@@ -1072,6 +1073,7 @@ RAY_UPDATE_LOOP_DONE:
     # ray->active_ray = 1;
     add r7, r7, 1
     sb r7, r0, 63           # ray->active_ray = 1 (r7=0)
+    lw r1, ROOT_NODE_ADDRESS
     # goto start_ray_traversal;
     beq r15, r15, START_RAY_TRAVERSAL, true
 NEGATIVE_RAY_COUNT:
@@ -1174,6 +1176,7 @@ WRITE_TO_RAY_IDX_LOOP:
     add r7, r7, 1
     beq r15, r15, WRITE_TO_RAY_IDX_LOOP, true
 WRITE_TO_RAY_IDX_LOOP_DONE:
+    lw r1, ROOT_NODE_ADDRESS
     # write_dram_byte(queue_address_low - 1, 0); // mark consumed
     add r9, r9, -1          # r9 = queue_address_low - 1
     sb_d r7, r9, 0           # write 0 to ready byte to mark consumed
@@ -1818,6 +1821,7 @@ RECEIVE_RAY_DATA:
     sw r10, r7, 52                          # slot[52] = ray_data[13]
     sw r11, r7, 56                          # slot[56] = ray_data[14]
     sw r12, r7, 60                          # slot[60] = ray_data[15]
+    lw r1, ROOT_NODE_ADDRESS
     intena 32                               # enable_interrupts(channel)
     jmp r15, r4                             # return
 
@@ -1851,7 +1855,6 @@ FIND_BRANCH_NODE:
     lw_d r9, r9, 28                        # parent index
     beq r15, r15, FIND_BRANCH_NODE, true
 FOUND_BRANCH_CORE_NODE:
-
     sw r10, r2, 0                            # dram_idx = 0
     or r11, r14, 0xFFFF
     sh r11, r2, 4                            # parent_ptr = 0xFFFF (null sentinel)
@@ -1874,7 +1877,7 @@ dfs_loop:
     lhu r8, r2, 10                           # is_right
     lw r9, r2, 12                            # depth
 
-    lw r10, SRAM_NODE_ALLOC_PTR              # address of alloc pointer / next free slot
+    add r10, r14, SRAM_NODE_ALLOC_PTR              # address of alloc pointer / next free slot
     atomadd r13, r10, 48                     # r13 = node = atomic_add(sram_slot_address, 48)
 
     lw r12, NODE_ARRAY_LOW                   # r12 = bottom_node_bits base
@@ -1900,13 +1903,25 @@ dfs_loop:
     # -- copy metadata --
     or r10, r14, 0xFFFF
     sh r10, r13, 30                          # core_owner
+    lhu_d r10, r12, 42
+    beq r14, r10, NOT_BRANCH_IMPORT, true
+    lhu_d r10, r12, 40
+    sh r10, r13, 40                          # queue_high_bit_addr
+    lw_d r10, r12, 36
+    add r10, r10 24512
+    sw r10, r13, 36                          # queue_low_bit_addr
+    lw_d r10, r12, 44
+    add r10, r10, 8192
+    sw r10, r13, 44                          # node_id
+    beq r15, r15, SKIP_NON_BRANCH_IMPORT, true
+NOT_BRANCH_IMPORT:
     lhu_d r10, r12, 40
     sh r10, r13, 40                          # queue_high_bit_addr
     lw_d r10, r12, 36
     sw r10, r13, 36                          # queue_low_bit_addr
     lw_d r10, r12, 44
     sw r10, r13, 44                          # node_id
-
+SKIP_NON_BRANCH_IMPORT:
     add r11, r14, 0xFFFF
     sh r11, r13, 42                          # prev_index = 0xFFFF
     sb r8, r13, 32                           # is_right = is_right (byte field)
@@ -1944,10 +1959,20 @@ CHECK_RECURSE:
     beq r10, r14, DO_RECURSE, true
     and r14, r14, 0
     beq r10, r11, SET_NODE_ID, true
+    lw r10, FOUND_LEAF_CORE_INDEX_FOR_BRANCH
+    and r14, r14, 0
+    bne r14, r10, dfs_loop, false
+    add r10, r14, LEAF_CORE_INDEX_FOR_BRANCH
+    atomadd r15, r10, 1
     beq r15, r15, dfs_loop, true             # foreign owner: stop here
 SET_NODE_ID:
+    add r10, r14, 1
+    sw r10, FOUND_LEAF_CORE_INDEX_FOR_BRANCH
     lw r10, r12, 44                        # node_id
-    sw r10, ROOT_NODE_ID                   # self.node_id = node_id from dram
+    sw r10, ROOT_NODE_ID
+    lw r10, SRAM_NODE_ALLOC_PTR
+    add r10, r10, -48
+    sw r10, ROOT_NODE_ADDRESS
 DO_RECURSE:
     # -- push right child first (so left is processed first) --
     and r14, r14, 0
@@ -2292,7 +2317,9 @@ NODE_ID_TABLE_LOW:
 EMERGENCY_QUEUE_SWITCHED_NODE: 
 .data -1
 LEAF_CORE_INDEX_FOR_BRANCH: 
-.data -1
+.data 0
+FOUND_LEAF_CORE_INDEX_FOR_BRANCH:
+.data 0
 SRAM_ALLOC_COUNT:       
 .data 0
 SRAM_NODE_ALLOC_PTR:     
@@ -2379,10 +2406,10 @@ INV_SQRT_TABLE_HIGH:
 .data 0
 INV_SQRT_TABLE_LOW: 
 .data 100000
-IDLE_QUEUE_HIGH: #CALCULATED AT RUNTIME!!!!!!
+IDLE_QUEUE_HIGH: #CALCULATED AT RUNTIME!!!!!! TODO
 .data 0
 IDLE_QUEUE_LOW: 
-.data 0x47868C00
+.data 2500000000
 RANDOM_TABLE_HIGH: 
 .data 0
 RANDOM_TABLE_LOW: 
@@ -2394,7 +2421,7 @@ RAYS_COMPLETED_LOW:
 PIXEL_DONE_HIGH:
 .data 0
 PIXEL_DONE_LOW:
-.data 168_000_004
+.data 168000004
 //DO NOT INCLUDE LINES BELOW THIS AS PULLED FROM DRAM
 RAY_ARRAY: 
 .data(256) 0
@@ -2419,9 +2446,9 @@ RAYS_PROCESSED:
 LAST_OBSERVED_CYCLE: 
 .data 0
 RAY_SEND_PENDING: 
-.data -1
+.data 0
 PULLED_FROM_FULL_QUEUE_CNT: 
-.data -1
+.data 0
 TILE_DATA_COUNT: 
 .data 0 #count
 TILE_IS_ACTIVE: 
@@ -2451,4 +2478,5 @@ VERTEX_ARRAY_BASE:
 .data 0
 INDEX_ARRAY_BASE:        
 .data -1
-
+ROOT_NODE_ADDRESS:
+.data -1
