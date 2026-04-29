@@ -6,7 +6,6 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
-//RYAN ADDED
 use std::collections::VecDeque;
 
 use crate::{CORES_IN_X_STACK, CoreLog};
@@ -32,58 +31,88 @@ pub const DEBUG: bool = false;
 pub const NOC_UTIL_EPOCH_LEN: usize = 250;
 pub const CTX_CNT: usize = 16;
 
-
-//cache constants ADDED BY RYAN
-pub const CACHE_LATENCY: u64 = 50;  
-pub const CACHE_LINESIZE: u64 = 64; //bytes
-pub const CACHE_CAPACITY: usize = CACHE_LINESIZE as usize * 512; //512 lines
-pub const CACHE_ASSOC: usize = 4; //1 = direct mapped
+pub const CACHE_LATENCY: u64 = 50;
+pub const CACHE_LINESIZE: u64 = 64;
+pub const CACHE_CAPACITY: usize = CACHE_LINESIZE as usize * 512;
+pub const CACHE_ASSOC: usize = 4;
 pub const CACHE_SET_COUNT: usize = CACHE_CAPACITY / (CACHE_LINESIZE as usize * CACHE_ASSOC);
-pub const DRAM_BW: usize = 2; //per cycle
-pub const CACHE_BW: usize = 8; //per cycle
+pub const EPOCH_LEN: u64 = 10;
+pub const DRAM_BYTES_PER_EPOCH: usize = 100;
+pub const CACHE_BYTES_PER_EPOCH: usize = 400;
+pub const CACHE_ENABLED: bool = true;
+pub const CACHE_QUEUE_CAPACITY: usize = 128;
 
-//ADDED BY RYAN
-pub struct CacheState{
+pub struct CacheState {
     pub enabled: bool,
     sets: Vec<VecDeque<u64>>,
+    pending_lines: std::collections::HashSet<u64>,
+    current_epoch: u64,
+    cache_bytes_this_epoch: usize,
+    dram_bytes_this_epoch: usize,
 }
-//Added by RYAN
+
 impl CacheState {
     pub fn new(enabled: bool) -> Self {
-        Self{
-            enabled, 
+        Self {
+            enabled,
             sets: vec![VecDeque::with_capacity(CACHE_ASSOC); CACHE_SET_COUNT],
+            pending_lines: std::collections::HashSet::new(),
+            current_epoch: 0,
+            cache_bytes_this_epoch: 0,
+            dram_bytes_this_epoch: 0,
         }
     }
-
-    pub fn access(&mut self, address: u64) -> bool {
-        if !self.enabled {
-            return false;
+    fn refresh(&mut self, cycle: u64) {
+        let epoch = cycle / EPOCH_LEN;
+        if epoch != self.current_epoch {
+            self.current_epoch           = epoch;
+            self.cache_bytes_this_epoch  = 0;
+            self.dram_bytes_this_epoch   = 0;
         }
+    }
+    pub fn try_consume_bw(&mut self, cycle: u64, cache_bytes: usize, dram_bytes: usize) -> bool {
+        self.refresh(cycle);
+        let cache_ok = cache_bytes == 0
+            || self.cache_bytes_this_epoch + cache_bytes <= CACHE_BYTES_PER_EPOCH;
+        let dram_ok = dram_bytes == 0
+            || self.dram_bytes_this_epoch + dram_bytes <= DRAM_BYTES_PER_EPOCH;
+        if cache_ok && dram_ok {
+            self.cache_bytes_this_epoch += cache_bytes;
+            self.dram_bytes_this_epoch  += dram_bytes;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn peek(&self, address: u64) -> bool {
+        if !self.enabled { return false; }
         let line = address / CACHE_LINESIZE;
-        let set = (line as usize) % CACHE_SET_COUNT;
+        let set  = (line as usize) % CACHE_SET_COUNT;
+        if self.pending_lines.contains(&line) { return false; }
+        self.sets[set].iter().any(|&l| l == line)
+    }
+    pub fn access(&mut self, address: u64) -> bool {
+        if !self.enabled { return false; }
+        let line = address / CACHE_LINESIZE;
+        let set  = (line as usize) % CACHE_SET_COUNT;
         let slot = &mut self.sets[set];
-        if let Some(pos) = slot.iter().position(|&l| l == line){
+        if let Some(pos) = slot.iter().position(|&l| l == line) {
             slot.remove(pos);
             slot.push_back(line);
             true
         } else {
-            if slot.len() == CACHE_ASSOC {
-                slot.pop_front();
-            }
-            slot.push_back(line);
+            self.pending_lines.insert(line);
             false
         }
-
     }
-}
-//Added by RYAN
-pub struct PendingAccess {
-    pub address: u64,
-    pub latency: u64,
-    pub calculated_val: u32,
-    pub register_index: usize,
-    pub is_write: bool,
+    pub fn resolve_pending(&mut self, address: u64) {
+        let line = address / CACHE_LINESIZE;
+        if !self.pending_lines.remove(&line) { return; }
+        let set  = (line as usize) % CACHE_SET_COUNT;
+        let slot = &mut self.sets[set];
+        if slot.len() == CACHE_ASSOC { slot.pop_front(); }
+        slot.push_back(line);
+    }
 }
 
 struct Inner<T> {
@@ -366,6 +395,7 @@ struct PipelineStage {
     cycle_to_read: u64,
     calculated_val: u32,
     register_index: usize,
+    dram_address: u64,
 }
 
 pub struct Flit {
@@ -753,6 +783,7 @@ pub struct Core {
     context_cnt: usize,
     dram_long_queue: SpscQueue<PipelineStage>,
     dram_short_queue: SpscQueue<PipelineStage>,
+    cache_queue: SpscQueue<PipelineStage>,
     context_in_progress: usize,
     register_file: Vec<u32>,
     register_ready: Vec<bool>,
@@ -794,13 +825,12 @@ pub struct Core {
     decoded_instruction: Option<DecodedInstruction>,
     cycle: u64,
 
-    //ADDED BY RYAN
-    pub cache: CacheState,
-    pub dram_queue: VecDeque<PendingAccess>,
-    pub cache_queue: VecDeque<PendingAccess>,
-    pub cache_hits: usize,
-    pub cache_misses: usize,
-    pub cache_accesses: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+    cache_accesses: usize,
+    cache_read_bytes_throttled: usize,
+    dram_read_bytes_throttled: usize,
+    dram_write_bytes_throttled: usize, 
 }
 impl Core {
     pub fn new(
@@ -808,7 +838,6 @@ impl Core {
         x_dim: u16,
         y_dim: u16,
         dram_top_bits: usize,
-        cache_enabled: bool, //RYAN ADDED
     ) -> Self {
         let init_time_mem: [u32; 12] = [
             0x00008002,   //PC = 0x00000000,     line: and r0, r0, 0 #00
@@ -845,6 +874,7 @@ impl Core {
             fp_pipe: SpscQueue::<PipelineStage>::new(FP_PIPE_STAGES),
             dram_long_queue: SpscQueue::<PipelineStage>::new(DRAM_LATENCY_FAR as usize),
             dram_short_queue: SpscQueue::<PipelineStage>::new(DRAM_LATENCY_CLOSE as usize),
+            cache_queue: SpscQueue::<PipelineStage>::new(CACHE_QUEUE_CAPACITY),
             context_cnt: 1,
             ctx_ownership: 0,
             context_in_progress: 0,
@@ -899,58 +929,34 @@ impl Core {
             mailbox_congestion: vec![],
             core_busy: vec![],
 
-            //RYAN ADDED
-            cache: CacheState::new(cache_enabled),
-            dram_queue: VecDeque::new(),
-            cache_queue: VecDeque::new(),
             cache_hits: 0,
             cache_misses: 0,
             cache_accesses: 0,
+            cache_read_bytes_throttled: 0,
+            dram_read_bytes_throttled: 0,
+            dram_write_bytes_throttled: 0,
         }
         
     }
-    //RYAN ADDED
-    fn drain_dram_queue(&mut self) {
-        let mut bw_used = 0;
-        while bw_used < DRAM_BW {
-            let needs_short_queue_slot = match self.dram_queue.front() {
-                Some(access) => !access.is_write,
-                None => break,
-            };
-            if needs_short_queue_slot && self.dram_short_queue.is_full() {
-                break;
-            }
-            let access = self.dram_queue.pop_front().unwrap();
-            if !access.is_write {
-                let _ = self.dram_short_queue.push(PipelineStage {
-                    cycle_to_read: self.cycle + access.latency,
-                    calculated_val: access.calculated_val,
-                    register_index: access.register_index,});
-            }
-            bw_used += 1;
-        }
-    }
-    fn drain_cache_queue(&mut self) {
-        let mut bw_used = 0;
-        while bw_used < CACHE_BW {
-            let needs_short_queue_slot = match self.cache_queue.front() {
-                Some(access) => !access.is_write,
-                None => break,
-            };
-            if needs_short_queue_slot && self.dram_short_queue.is_full() {
-                break;
-            }
-            let access = self.cache_queue.pop_front().unwrap();
-            if !access.is_write {
-                let _ = self.dram_short_queue.push(PipelineStage {
-                    cycle_to_read: self.cycle + access.latency,
-                    calculated_val: access.calculated_val,
-                    register_index: access.register_index,});
-            }
-            bw_used += 1;
-        }
-    }
 
+    pub fn get_cache_hits(&self) -> usize {
+        self.cache_hits
+    }
+    pub fn get_cache_misses(&self) -> usize {
+        self.cache_misses
+    }
+    pub fn get_cache_accesses(&self) -> usize {
+        self.cache_accesses
+    }
+    pub fn get_cache_read_bytes_throttled(&self) -> usize {
+        self.cache_read_bytes_throttled
+    }
+    pub fn get_dram_read_bytes_throttled(&self) -> usize {
+        self.dram_read_bytes_throttled
+    }
+    pub fn get_dram_write_bytes_throttled(&self) -> usize {
+        self.dram_write_bytes_throttled
+    }
     fn dump_instruction(&self, inst: &DecodedInstruction){
         inst.dump(self.context_in_progress, &self.register_file);
     }
@@ -978,11 +984,6 @@ impl Core {
                 self.flit_sent_manhattan_distance_traversed,
             flit_received_manhattan_distance_traversed:
                 self.flit_received_manhattan_distance_traversed,
-
-            //ADDED BY RYAN
-            cache_hits: self.cache_hits,
-            cache_misses: self.cache_misses,
-            cache_accesses: self.cache_accesses,
         }
     }
     pub fn give_far_dram(&mut self, dram_vec: Vec<Sender<LongDramRequest>>) {
@@ -1620,11 +1621,7 @@ impl Core {
         }
     }
 
-    pub fn tick(&mut self, dram: &mut Vec<u32>) {
-        //RYAN ADDED
-        self.drain_cache_queue();
-        self.drain_dram_queue();
-
+    pub fn tick(&mut self, dram: &mut Vec<u32>, cache: &mut CacheState) {
         while self.fp_pipe.peek().is_some()
             && self.fp_pipe.peek().unwrap().cycle_to_read <= self.cycle
         {
@@ -1649,10 +1646,17 @@ impl Core {
             && self.dram_short_queue.peek().unwrap().cycle_to_read <= self.cycle
         {
             let dram_stage = self.dram_short_queue.pop().unwrap();
-            self.register_file[dram_stage.register_index] =
-                dram_stage.calculated_val;
-            self.register_ready[dram_stage.register_index] =
-                true;
+            self.register_file[dram_stage.register_index] = dram_stage.calculated_val;
+            self.register_ready[dram_stage.register_index] = true;
+            cache.resolve_pending(dram_stage.dram_address);
+        }
+
+        while self.cache_queue.peek().is_some()
+            && self.cache_queue.peek().unwrap().cycle_to_read <= self.cycle
+        {
+            let stage = self.cache_queue.pop().unwrap();
+            self.register_file[stage.register_index] = stage.calculated_val;
+            self.register_ready[stage.register_index] = true;
         }
 
         loop {
@@ -1735,6 +1739,10 @@ impl Core {
                 instruction_to_execute.pc == self.pc[self.context_in_progress],
                 "PC MISMATCH DURING EXECUTION"
             );
+
+            let saved_pc  = self.pc[self.context_in_progress];
+            let saved_ctx = self.context_in_progress;
+            let mut throttled_by_bw = false;
 
             if !switch_ctx {
                 if DEBUG && self.core_id == 64 * 63 + 63 {
@@ -1890,6 +1898,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: mul_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
                         let _ = self.fp_pipe.push(mul_pipe_stage);
                         self.pc[self.context_in_progress] += 4;
@@ -1912,6 +1921,7 @@ impl Core {
                             cycle_to_read: self.cycle + DIV_LATENCY as u64,
                             calculated_val: div_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
                         if self.div_seq.is_full() {
                             switch_ctx = true;
@@ -1935,6 +1945,7 @@ impl Core {
                             cycle_to_read: self.cycle + DIV_LATENCY as u64,
                             calculated_val: div_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
                         if self.div_seq.is_full() {
                             switch_ctx = true;
@@ -1973,6 +1984,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: fpadd_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
 
                         let _ = self.fp_pipe.push(fpadd_pipe_stage);
@@ -2008,6 +2020,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: fpmul_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
 
                         let _ = self.fp_pipe.push(fpmul_pipe_stage);
@@ -2043,6 +2056,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: fpsub_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
 
                         let _ = self.fp_pipe.push(fpsub_pipe_stage);
@@ -2130,6 +2144,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: fpeq_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         });
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -2186,6 +2201,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: fplt_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         });
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -2211,6 +2227,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: accumulated_value,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         });
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -2255,6 +2272,7 @@ impl Core {
                             cycle_to_read: self.cycle + FP_PIPE_STAGES as u64,
                             calculated_val: fpminmax_result,
                             register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                            dram_address: 0,
                         };
 
                         let _ = self.fp_pipe.push(fpminmax_pipe_stage);
@@ -2649,33 +2667,34 @@ impl Core {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_FAR,
                                 calculated_val: 0,
                                 register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                dram_address: 0,
                             };
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
-                            let value = dram[dram_address / 4];
-                            let byte_offset = dram_address % 4;
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFF) as i8 as i32 as u32,
-                                    register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                            let is_hit = cache.peek(dram_address as u64);
+                            let (cache_bw, dram_bw) = if is_hit { (1, 0) } else { (1, CACHE_LINESIZE as usize) };
+                            if !cache.try_consume_bw(self.cycle, cache_bw, dram_bw) {
+                                long_latency_op = false; switch_ctx = true; throttled_by_bw = true;
+                                if is_hit { self.cache_read_bytes_throttled += 1; }
+                                else { self.dram_read_bytes_throttled += CACHE_LINESIZE as usize; }
                             } else {
+                                self.cache_accesses += 1;
+                                if is_hit { self.cache_hits += 1; } else { self.cache_misses += 1; }
+                                cache.access(dram_address as u64);
                                 self.dram_bytes_read_close += 1;
-                                self.cache_misses += 1;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFF) as i8 as i32 as u32,
+                                let value = dram[dram_address / 4];
+                                let byte_offset = dram_address % 4;
+                                let raw = ((value >> (byte_offset * 8)) & 0xFF) as i8 as i32 as u32;
+                                let stage = PipelineStage {
+                                    cycle_to_read: self.cycle + if is_hit { CACHE_LATENCY } else { DRAM_LATENCY_CLOSE },
+                                    calculated_val: raw,
                                     register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
-                            }                        }
+                                    dram_address: dram_address as u64,
+                                };
+                                if is_hit { assert!(self.cache_queue.push(stage).is_ok()); }
+                                else { let _ = self.dram_short_queue.push(stage); }
+                            }
+                        }
 
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -2711,32 +2730,32 @@ impl Core {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_FAR,
                                 calculated_val: 0,
                                 register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                dram_address: 0,
                             };
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
-                            let value = dram[dram_address / 4];
-                            let byte_offset = dram_address % 4;
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFF) as u8 as u32,
-                                    register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                            let is_hit = cache.peek(dram_address as u64);
+                            let (cache_bw, dram_bw) = if is_hit { (1, 0) } else { (1, CACHE_LINESIZE as usize) };
+                            if !cache.try_consume_bw(self.cycle, cache_bw, dram_bw) {
+                                long_latency_op = false; switch_ctx = true; throttled_by_bw = true;
+                                if is_hit { self.cache_read_bytes_throttled += 1; }
+                                else { self.dram_read_bytes_throttled += CACHE_LINESIZE as usize; }
                             } else {
+                                self.cache_accesses += 1;
+                                if is_hit { self.cache_hits += 1; } else { self.cache_misses += 1; }
+                                cache.access(dram_address as u64);
                                 self.dram_bytes_read_close += 1;
-                                self.cache_misses += 1;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFF) as u8 as u32,
+                                let value = dram[dram_address / 4];
+                                let byte_offset = dram_address % 4;
+                                let raw = ((value >> (byte_offset * 8)) & 0xFF) as u8 as u32;
+                                let stage = PipelineStage {
+                                    cycle_to_read: self.cycle + if is_hit { CACHE_LATENCY } else { DRAM_LATENCY_CLOSE },
+                                    calculated_val: raw,
                                     register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                                    dram_address: dram_address as u64,
+                                };
+                                if is_hit { assert!(self.cache_queue.push(stage).is_ok()); }
+                                else { let _ = self.dram_short_queue.push(stage); }
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -2777,32 +2796,32 @@ impl Core {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_FAR,
                                 calculated_val: 0,
                                 register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                dram_address: 0,
                             };
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
-                            let value = dram[dram_address / 4];
-                            let byte_offset = dram_address & 0x2; //will be either 0 or 2
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFFFF) as i16 as i32 as u32,
-                                    register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                            let is_hit = cache.peek(dram_address as u64);
+                            let (cache_bw, dram_bw) = if is_hit { (2, 0) } else { (2, CACHE_LINESIZE as usize) };
+                            if !cache.try_consume_bw(self.cycle, cache_bw, dram_bw) {
+                                long_latency_op = false; switch_ctx = true; throttled_by_bw = true;
+                                if is_hit { self.cache_read_bytes_throttled += 2; }
+                                else { self.dram_read_bytes_throttled += CACHE_LINESIZE as usize; }
                             } else {
+                                self.cache_accesses += 1;
+                                if is_hit { self.cache_hits += 1; } else { self.cache_misses += 1; }
+                                cache.access(dram_address as u64);
                                 self.dram_bytes_read_close += 2;
-                                self.cache_misses += 1;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val:  ((value >> (byte_offset * 8)) & 0xFFFF) as i16 as i32 as u32,
+                                let value = dram[dram_address / 4];
+                                let byte_offset = dram_address & 0x2;
+                                let raw = ((value >> (byte_offset * 8)) & 0xFFFF) as i16 as i32 as u32;
+                                let stage = PipelineStage {
+                                    cycle_to_read: self.cycle + if is_hit { CACHE_LATENCY } else { DRAM_LATENCY_CLOSE },
+                                    calculated_val: raw,
                                     register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                                    dram_address: dram_address as u64,
+                                };
+                                if is_hit { assert!(self.cache_queue.push(stage).is_ok()); }
+                                else { let _ = self.dram_short_queue.push(stage); }
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -2843,32 +2862,32 @@ impl Core {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_FAR,
                                 calculated_val: 0,
                                 register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                dram_address: 0,
                             };
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
-                            let value = dram[dram_address / 4];
-                            let byte_offset = dram_address & 0x2; //will be either 0 or 2
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFFFF) as u16 as u32,
-                                    register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                            let is_hit = cache.peek(dram_address as u64);
+                            let (cache_bw, dram_bw) = if is_hit { (2, 0) } else { (2, CACHE_LINESIZE as usize) };
+                            if !cache.try_consume_bw(self.cycle, cache_bw, dram_bw) {
+                                long_latency_op = false; switch_ctx = true; throttled_by_bw = true;
+                                if is_hit { self.cache_read_bytes_throttled += 2; }
+                                else { self.dram_read_bytes_throttled += CACHE_LINESIZE as usize; }
                             } else {
+                                self.cache_accesses += 1;
+                                if is_hit { self.cache_hits += 1; } else { self.cache_misses += 1; }
+                                cache.access(dram_address as u64);
                                 self.dram_bytes_read_close += 2;
-                                self.cache_misses += 1;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val: ((value >> (byte_offset * 8)) & 0xFFFF) as u16 as u32,
+                                let value = dram[dram_address / 4];
+                                let byte_offset = dram_address & 0x2;
+                                let raw = ((value >> (byte_offset * 8)) & 0xFFFF) as u16 as u32;
+                                let stage = PipelineStage {
+                                    cycle_to_read: self.cycle + if is_hit { CACHE_LATENCY } else { DRAM_LATENCY_CLOSE },
+                                    calculated_val: raw,
                                     register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                                    dram_address: dram_address as u64,
+                                };
+                                if is_hit { assert!(self.cache_queue.push(stage).is_ok()); }
+                                else { let _ = self.dram_short_queue.push(stage); }
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -2910,31 +2929,30 @@ impl Core {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_FAR,
                                 calculated_val: 0,
                                 register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                dram_address: 0,
                             };
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
-                            let value = dram[dram_address / 4];
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: value,
-                                    register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                            let is_hit = cache.peek(dram_address as u64);
+                            let (cache_bw, dram_bw) = if is_hit { (4, 0) } else { (4, CACHE_LINESIZE as usize) };
+                            if !cache.try_consume_bw(self.cycle, cache_bw, dram_bw) {
+                                long_latency_op = false; switch_ctx = true; throttled_by_bw = true;
+                                if is_hit { self.cache_read_bytes_throttled += 4; }
+                                else { self.dram_read_bytes_throttled += CACHE_LINESIZE as usize; }
                             } else {
+                                self.cache_accesses += 1;
+                                if is_hit { self.cache_hits += 1; } else { self.cache_misses += 1; }
+                                cache.access(dram_address as u64);
                                 self.dram_bytes_read_close += 4;
-                                self.cache_misses += 1;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val:  value,
+                                let raw = dram[dram_address / 4];
+                                let stage = PipelineStage {
+                                    cycle_to_read: self.cycle + if is_hit { CACHE_LATENCY } else { DRAM_LATENCY_CLOSE },
+                                    calculated_val: raw,
                                     register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                    is_write: false,
-                                });
+                                    dram_address: dram_address as u64,
+                                };
+                                if is_hit { assert!(self.cache_queue.push(stage).is_ok()); }
+                                else { let _ = self.dram_short_queue.push(stage); }
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -2973,29 +2991,13 @@ impl Core {
                                 );
                             }
                         } else {
-                            self.dram_bytes_wrote_close += 4;
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                dram[dram_address / 4] = value_to_store;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: 0,
-                                    register_index: 0,
-                                    is_write: true,
-                                });
+                            if !cache.try_consume_bw(self.cycle, 0, 4) {
+                                switch_ctx = true;
+                                throttled_by_bw = true;
+                                self.dram_write_bytes_throttled += 4;
                             } else {
-                                self.cache_misses += 1;
+                                self.dram_bytes_wrote_close += 4;
                                 dram[dram_address / 4] = value_to_store;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val:  0,
-                                    register_index: 0,
-                                    is_write: true,
-                                });
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -3035,33 +3037,17 @@ impl Core {
                                 );
                             }
                         } else {
-                            self.dram_bytes_wrote_close += 2;
-                            let old_value = dram[dram_address / 4];
-                            let byte_offset = dram_address & 0x2;
-                            let mut value_to_store = (value_to_store as u32) << (byte_offset * 8);
-                            value_to_store = (old_value & !(0xFFFF << (byte_offset * 8))) | value_to_store;
-                            self.cache_accesses += 1;
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                dram[dram_address / 4] = value_to_store;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: 0,
-                                    register_index: 0,
-                                    is_write: true,
-                                });
+                            if !cache.try_consume_bw(self.cycle, 0, 2) {
+                                switch_ctx = true; 
+                                throttled_by_bw = true;
+                                self.dram_write_bytes_throttled += 2;
                             } else {
-                                self.cache_misses += 1;
-                                dram[dram_address / 4] = value_to_store;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val:  0,
-                                    register_index: 0,
-                                    is_write: true,
-                                });
+                                self.dram_bytes_wrote_close += 2;
+                                let old_value = dram[dram_address / 4];
+                                let byte_offset = dram_address & 0x2;
+                                let merged = (old_value & !(0xFFFF << (byte_offset * 8)))
+                                    | ((value_to_store & 0xFFFF) << (byte_offset * 8));
+                                dram[dram_address / 4] = merged;
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -3097,34 +3083,17 @@ impl Core {
                                 );
                             }
                         } else {
-                            self.dram_bytes_wrote_close += 1;
-                            let old_value = dram[dram_address / 4];
-                            let byte_offset = dram_address & 0x3;
-                            let mut value_to_store = (value_to_store as u32) << (byte_offset * 8);
-                            value_to_store =
-                                (old_value & !(0xFF << (byte_offset * 8))) | value_to_store;
-                            let cache_hit = self.cache.access(dram_address as u64);
-                            self.cache_accesses += 1;
-                            if cache_hit {
-                                self.cache_hits += 1;
-                                dram[dram_address / 4] = value_to_store;
-                                self.cache_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: CACHE_LATENCY,
-                                    calculated_val: 0,
-                                    register_index: 0,
-                                    is_write: true,
-                                });
+                            if !cache.try_consume_bw(self.cycle, 0, 1) {
+                                switch_ctx = true;
+                                throttled_by_bw = true;
+                                self.dram_write_bytes_throttled += 1;
                             } else {
-                                self.cache_misses += 1;
-                                dram[dram_address / 4] = value_to_store;
-                                self.dram_queue.push_back(PendingAccess {
-                                    address: dram_address as u64,
-                                    latency: DRAM_LATENCY_CLOSE,
-                                    calculated_val:  0,
-                                    register_index: 0,
-                                    is_write: true,
-                                });
+                                self.dram_bytes_wrote_close += 1;
+                                let old_value = dram[dram_address / 4];
+                                let byte_offset = dram_address & 0x3;
+                                let merged = (old_value & !(0xFF << (byte_offset * 8)))
+                                    | ((value_to_store & 0xFF) << (byte_offset * 8));
+                                dram[dram_address / 4] = merged;
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -3167,20 +3136,29 @@ impl Core {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_FAR,
                                 calculated_val: 0,
                                 register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                dram_address: 0,
                             };
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
-                            self.dram_bytes_wrote_close += 4;
-                            self.dram_bytes_read_close += 4;
-                            let old_value = dram[dram_address / 4];
-                            dram[dram_address / 4] = old_value + value_to_store;
-                            self.dram_queue.push_back(PendingAccess {
-                                address: dram_address as u64,
-                                latency: DRAM_LATENCY_CLOSE,
-                                calculated_val: old_value,
-                                register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
-                                is_write: false,
-                            });
+                            if !cache.try_consume_bw(self.cycle, 0, 8) {
+                                long_latency_op = false;
+                                switch_ctx = true;
+                                throttled_by_bw = true;
+                                self.dram_read_bytes_throttled  += 4;
+                                self.dram_write_bytes_throttled += 4;
+                            } else {
+                                self.dram_bytes_read_close  += 4;
+                                self.dram_bytes_wrote_close += 4;
+                                let old_value = dram[dram_address / 4];
+                                dram[dram_address / 4] = old_value.wrapping_add(value_to_store);
+                                let load_dispatch = PipelineStage {
+                                    cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
+                                    calculated_val: old_value,
+                                    register_index: instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT,
+                                    dram_address: dram_address as u64,
+                                };
+                                let _ = self.dram_short_queue.push(load_dispatch);
+                            }
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3256,6 +3234,9 @@ impl Core {
                 };
                 flush = true;
             }
+            if throttled_by_bw {
+                self.pc[saved_ctx] = saved_pc;
+            }
         }
         let next_fetched_value: Option<u32>;
         let next_fetch_pc: Option<u16>;
@@ -3311,4 +3292,3 @@ impl Core {
         self.cycle += 1;
     }
 }
-
