@@ -7,7 +7,6 @@ use crate::parse_bvh::assemble_tree;
 pub mod core;
 pub mod matrices;
 pub mod parse_bvh;
-pub mod data_acquisition;
 use half::f16;
 use hashbrown::HashMap;
 use rand::rngs::StdRng;
@@ -25,6 +24,8 @@ use std::fs::create_dir_all;
 const CORES_IN_X_STACK: u16 = 4;
 const CORES_IN_Y_STACK: u16 = 4;
 const PRINT_STATS: bool = true;
+
+
 struct Stack {
     cores: Vec<Core>,
     dram_stack: Vec<u32>,
@@ -37,12 +38,6 @@ struct Stack {
     local_write: usize,
     foreign_read: usize,
     foreign_write: usize,
-}
-
-fn init_dram(init: &[u32], dram: &mut Vec<u32>, starting_address: usize, num_bytes: usize) {
-    for i in 0..num_bytes / 4 {
-        dram[starting_address + i] = init[i];
-    }
 }
 
 fn assemble_stacks() -> Vec<Stack> {
@@ -215,20 +210,32 @@ fn dram_read_unsigned_byte(dram: &Vec<u32>, addr: usize) -> u32 {
     (word >> (off * 8)) & 0xFF
 }
 fn dram_read_signed_half(dram: &Vec<u32>, addr: usize) -> u32 {
-    assert!(addr & 0x1 == 0, "DRAM Half LOADS CAN'T BE UNALIGNED");
+    assert!(
+        addr & 0x1 == 0,
+        "DRAM Half LOADS CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
+        addr, addr
+    );
     let word = dram[dram_word_index(addr)];
-    let off = addr & 0x2; // 0 or 2
+    let off = addr & 0x2;
     let half = ((word >> (off * 8)) & 0xFFFF) as u16;
     (half as i16 as i32) as u32
 }
 fn dram_read_unsigned_half(dram: &Vec<u32>, addr: usize) -> u32 {
-    assert!(addr & 0x1 == 0, "DRAM Half LOADS CAN'T BE UNALIGNED");
+    assert!(
+        addr & 0x1 == 0,
+        "DRAM Half LOADS CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
+        addr, addr
+    );
     let word = dram[dram_word_index(addr)];
     let off = addr & 0x2;
     (word >> (off * 8)) & 0xFFFF
 }
 fn dram_read_word(dram: &Vec<u32>, addr: usize) -> u32 {
-    assert!(addr & 0x3 == 0, "DRAM Word LOADS CAN'T BE UNALIGNED");
+    assert!(
+        addr & 0x3 == 0,
+        "DRAM Word LOADS CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
+        addr, addr
+    );
     dram[dram_word_index(addr)]
 }
 fn dram_store_byte(dram: &mut Vec<u32>, addr: usize, value: u32) {
@@ -238,18 +245,30 @@ fn dram_store_byte(dram: &mut Vec<u32>, addr: usize, value: u32) {
     dram[idx] = (dram[idx] & mask) | ((value & 0xFF) << (off * 8));
 }
 fn dram_store_half(dram: &mut Vec<u32>, addr: usize, value: u32) {
-    assert!(addr & 0x1 == 0, "DRAM Half LOADS CAN'T BE UNALIGNED");
+    assert!(
+        addr & 0x1 == 0,
+        "DRAM Half STORES CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
+        addr, addr
+    );
     let idx = dram_word_index(addr);
     let off = addr & 0x2;
     let mask = !(0xFFFF << (off * 8));
     dram[idx] = (dram[idx] & mask) | ((value & 0xFFFF) << (off * 8));
 }
 fn dram_store_word(dram: &mut Vec<u32>, addr: usize, value: u32) {
-    assert!(addr & 0x3 == 0, "DRAM Word LOADS CAN'T BE UNALIGNED");
+    assert!(
+        addr & 0x3 == 0,
+        "DRAM Word STORES CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
+        addr, addr
+    );
     dram[dram_word_index(addr)] = value;
 }
 fn dram_atomic_add(dram: &mut Vec<u32>, addr: usize, value: u32) -> u32 {
-    assert!(addr & 0x3 == 0, "DRAM Word LOADS CAN'T BE UNALIGNED");
+    assert!(
+        addr & 0x3 == 0,
+        "DRAM Word ATOMIC ADD CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
+        addr, addr
+    );
     let idx = dram_word_index(addr);
     let old = dram[idx];
     dram[idx] = old.wrapping_add(value);
@@ -546,7 +565,7 @@ fn dump_logs_for_viz(
     Ok(())
 }
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 
 fn read_placements(path: String) -> std::io::Result<Vec<(u32, u32, u32)>> {
     let file = File::open(path)?;
@@ -679,14 +698,14 @@ pub fn load_bvh_nodes() -> Vec<BvhNode> {
         .map(|line| {
             let p: Vec<&str> = line.split_ascii_whitespace().collect();
             BvhNode {
-                min_x: p[0].parse().unwrap(),
-                min_y: p[1].parse().unwrap(),
-                min_z: p[2].parse().unwrap(),
-                max_x: p[3].parse().unwrap(),
-                max_y: p[4].parse().unwrap(),
-                max_z: p[5].parse().unwrap(),
-                left_first: p[6].parse().unwrap(),
-                tri_count: p[7].parse().unwrap(),
+                min_x: p[1].parse().unwrap(),
+                min_y: p[2].parse().unwrap(),
+                min_z: p[3].parse().unwrap(),
+                max_x: p[4].parse().unwrap(),
+                max_y: p[5].parse().unwrap(),
+                max_z: p[6].parse().unwrap(),
+                left_first: p[7].parse().unwrap(),
+                tri_count: p[8].parse().unwrap(),
                 parent: u32::MAX,
             }
         })
@@ -737,19 +756,9 @@ fn walk(
         // but the actual firstTri offset lives in bvh_leaves under left_first.
         // e.g. node 15 has left_first=71, tri_count=1 → look up node 71 in
         // bvh_leaves to find where in bvh_triangles to read from.
-        let leaf_id = node.left_first;
-        let leaf = &leaves[leaf_id as usize];
-
-        // Collect leaf.tri_count consecutive triangles starting at leaf.first_tri
-        let end = leaf.first_tri + leaf.tri_count;
-        if end > triangles.len() {
-            eprintln!(
-                "Warning: leaf {} requests tris {}..{} but only {} exist",
-                leaf_id, leaf.first_tri, end, triangles.len()
-            );
-            return;
-        }
-        out.extend_from_slice(&triangles[leaf.first_tri..end]);
+        let tri_id = node.left_first as usize;
+        let tri_count = node.tri_count as usize;
+        out.extend_from_slice(&triangles[tri_id..tri_id + tri_count]);
         return;
     }
 
@@ -835,14 +844,14 @@ fn parse_bvh_nodes(path: &str) -> Vec<BvhNode> {
         }
 
         nodes.push(BvhNode {
-            min_x:      parts[0].parse().unwrap(),
-            min_y:      parts[1].parse().unwrap(),
-            min_z:      parts[2].parse().unwrap(),
-            max_x:      parts[3].parse().unwrap(),
-            max_y:      parts[4].parse().unwrap(),
-            max_z:      parts[5].parse().unwrap(),
-            left_first: parts[6].parse().unwrap(),
-            tri_count:  parts[7].parse().unwrap(),
+            min_x:      parts[1].parse().unwrap(),
+            min_y:      parts[2].parse().unwrap(),
+            min_z:      parts[3].parse().unwrap(),
+            max_x:      parts[4].parse().unwrap(),
+            max_y:      parts[5].parse().unwrap(),
+            max_z:      parts[6].parse().unwrap(),
+            left_first: parts[7].parse().unwrap(),
+            tri_count:  parts[8].parse().unwrap(),
             parent:     0,  // filled in below
         });
     }
@@ -928,8 +937,6 @@ fn parse_triangles(path: &str) -> Vec<TriangleVertices> {
 fn main() {
     // assemble_tree("bvh_data".to_string());
     // return;
-    data_acquisition::run_data_acquisition();
-    return;
 
 
     let mut stacks: Vec<Stack> = assemble_stacks();
@@ -997,15 +1004,21 @@ fn main() {
         vec![100_000_000, 100_000_000, 100_000_000, 100_000_000]];
     for i in 0..node_id_vec.len(){
         node_id_hash_map.insert(node_id_vec[i].2, (i, node_id_vec[i].3));
-        let mut big_address: u64 = node_id_vec[i].0 as u64 + node_id_vec[i].1 as u64 * 4;
+        let mut big_address: u64 = (node_id_vec[i].0 / 32) as u64 + (node_id_vec[i].1 / 32) as u64 * 4;
         big_address <<= 31;
         big_address += ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32] as u64;
         stacks[0].dram_stack[2*i + start_of_dram_queue_mapping] = (big_address >> 32) as u32;
         stacks[0].dram_stack[2*i + start_of_dram_queue_mapping + 1] = (big_address) as u32;
         address_ray_queue_hash_map.insert(i, big_address);
+        if big_address > 1<<34 {
+            println!("Alloc point: {}", ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32]);
+            println!("Big address: {}, node_struct: {:?}", big_address, node_id_vec[i]);
+            panic!();
+        }
         ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32] += 64 * 1024;
-    }
 
+    }
+    println!("Allocating values next to the dram queues");
 
     let tri_vec = parse_triangles("bvh_triangles.txt");
     let node_vec = parse_bvh_nodes("bvh_nodes.txt");
@@ -1039,7 +1052,7 @@ fn main() {
             }
         }
     }
-
+    println!("Finished allocating values next to the dram queues");
     let start_of_node_init_table = 20_000 / 4;
 
     let placement_vec = placement_vec_wrapped.unwrap();
@@ -1067,7 +1080,7 @@ fn main() {
         let x: u32 = rng.random();
         stacks[0].dram_stack[i + start_of_random_table] = x;
     }
-
+    println!("Finished getting random numbers");
     let start_of_inv_sqrt = 100_000 / 4;
 
     for i in 0..(32768 / 4) {
@@ -1090,7 +1103,6 @@ fn main() {
         let value = (seed as f32).to_bits() & 0x007F_FFFF;
         stacks[0].dram_stack[i + start_of_inv_sqrt] = value;
     }
-
     let start_of_int_to_float_table = 150000 / 4;
 
     for i in 0..10240 / 4 {
@@ -1143,7 +1155,7 @@ fn main() {
             stacks[0].dram_stack[slots_base + slot_index] = slot_word;
         }
     }
-
+    println!("Finished tile queues");
     let leaf_core_code_base = 61_010_000 / 4;
     for i in matrices::get_leaf_core_code().iter().enumerate() {
         stacks[0].dram_stack[leaf_core_code_base + i.0] = *i.1;
@@ -1153,13 +1165,13 @@ fn main() {
     for i in matrices::get_branch_core_code().iter().enumerate() {
         stacks[0].dram_stack[branch_core_code_base + i.0] = *i.1;
     }
-
+    println!("Finished copying code");
     let barrier = Arc::new(Barrier::new((CORES_IN_X_STACK * CORES_IN_Y_STACK) as usize));
     let mut handles = Vec::new();
     let done = Arc::new(AtomicBool::new(false));
 
     print!("Enter cores to watch (0-8191, comma/space separated): ");
-
+    io::stdout().flush().unwrap();
     let mut input = String::new();
     io::stdin().read_line(&mut input).unwrap();
 
@@ -1171,12 +1183,13 @@ fn main() {
         .collect();
 
     print!("Enter core to inspect (0-15, or Enter to skip): ");
+    io::stdout().flush().unwrap();
     io::stdin().read_line(&mut input).unwrap();
     let context_to_watch = match input.trim() {
         "" => -1,
         s => s.parse::<i32>().ok().filter(|&n| (0..=15).contains(&n)).unwrap_or(-1),
     };
-
+    println!("Context to watch: {}, cores to watch: {:?}", context_to_watch, cores_to_watch);
     for (stack_num, mut stack) in stacks.into_iter().enumerate() {
         let barrier = barrier.clone();
         let done_per_thread = done.clone();

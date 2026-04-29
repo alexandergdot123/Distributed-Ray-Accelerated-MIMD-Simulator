@@ -1,5 +1,6 @@
 use half::f16;
 use std::cell::UnsafeCell;
+use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::{self, NonNull};
@@ -22,11 +23,11 @@ pub const OUTPUT_NOC_FIFO_CAPACITY: usize = 1;
 pub const PRIORITIZE_X: bool = false;
 pub const CORES_IN_X: u16 = 16;
 pub const CORES_IN_Y: u16 = 16;
-pub const DRAM_STACK_SIZE: usize = 1 << 29;
-pub const DRAM_STACK_SIZE_LOG2: usize = 29;
+pub const DRAM_STACK_SIZE: usize = 1 << 31;
+pub const DRAM_STACK_SIZE_LOG2: usize = 31;
 pub const NOC_FIFO_SIZE: usize = 1;
 pub const NOC_FIFO_LATENCY: usize = 1;
-pub const DEBUG: bool = false;
+pub const DEBUG: bool = true;
 pub const NOC_UTIL_EPOCH_LEN: usize = 250;
 pub const CTX_CNT: usize = 16;
 struct Inner<T> {
@@ -1618,8 +1619,10 @@ impl Core {
                         core_in_list = true;
                     }
                 }
-                if DEBUG && core_in_list && (*context_to_monitor == self.context_in_progress as i32 || *context_to_monitor < 0) {
+                // if DEBUG && (core_in_list || cores_to_monitor.len() == 0) && (*context_to_monitor == self.context_in_progress as i32 || *context_to_monitor < 0)
+                {
                     println!(
+
                         "Core {} executing instruction x{:08X} ({:?}) at PC {:08X} in context {} at cycle {}, dr: {}, sr1: {}, sr1_val: {}, is_imm: {}, sr2: {}, sr2_val: {},imm_val: {}",
                         self.core_id,
                         instruction_to_execute.raw_instruction,
@@ -1635,6 +1638,7 @@ impl Core {
                         self.register_file[self.context_in_progress * CTX_CNT + instruction_to_execute.sr2],
                         instruction_to_execute.imm_0
                     );
+                    io::stdout().flush().unwrap();
                 }
                 match instruction_to_execute.operation {
                     Operation::Add => {
