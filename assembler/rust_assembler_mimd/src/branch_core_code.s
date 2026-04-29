@@ -1,4 +1,4 @@
-.org 4 //TODO
+.org 0x2C //TODO
 
 # 0x196C <- 6508 bytes append to the end
 # 15372 - 6508 = 8864
@@ -17,6 +17,7 @@
     .data -1
     NODE_INDEX_OF_ROOT:
     .data -1
+beq r15, r15, download_bvh_tree, true
 SWITCH_DRAM_QUEUE:
     lw r12, NODE_ID_TABLE_HIGH
     setmembits r12

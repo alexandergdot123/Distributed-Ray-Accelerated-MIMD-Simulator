@@ -1,19 +1,19 @@
-.org  0x28    # TODO Double check
+.org  40    # TODO Double check
 .data 40        # TODO Double check
 
     # uint32_t dram_queue_array_address = self.dram_queue_array_low + (self.core_id << 3);
     beq r15, r15, INITIALIZE_CORE, true
     
     RAY_QUEUE_HIGH: 
-    .data -1
+    .data 0xA5A5A5A5
     RAY_QUEUE_LOW: 
-    .data -1
+    .data 0xDEADBEEF
     IS_BRANCH_CORE: 
-    .data -1
+    .data 0x69696969
     ROOT_NODE_ID:           
-    .data -1
+    .data 0x67676767
     NODE_INDEX_OF_ROOT:
-    .data -1
+    .data 0xCAFEBABE
 INITIALIZE_CORE:
     lw r0, dram_queue_array_high    
 
@@ -101,14 +101,14 @@ num_instructions_branch:
 branch_addr_high:
     .data 0   
 branch_addr_low:
-    .data 400 
+    .data 424 
 num_instructions_leaf:
     .data 1633   
 leaf_addr_high:
     .data 0   
 leaf_addr_low:
-    .data 61010000   
+    .data 61010024   
 AND_MASK:
     .data 0x7FFFFFFF
 START_OF_DOWNLOADING_MORE_CODE:
-    .data 68
+    .data 0x44

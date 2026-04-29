@@ -1,5 +1,5 @@
 stack_id,local_read,local_write,foreign_read,foreign_write
-0,94208,512,1363968,7680
+0,100352,512,1456128,7680
 1,0,0,0,0
 2,0,0,0,0
 3,0,0,0,0

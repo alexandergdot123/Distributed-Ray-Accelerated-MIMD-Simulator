@@ -1753,7 +1753,7 @@ impl Core {
                         || *context_to_monitor < 0)
                 {
                     println!(
-                        "Core {} executing instruction x{:08X} ({:?}) at PC {:08X} in context {} at cycle {}, dr: {}, sr1: {}, sr1_val: {}, is_imm: {}, sr2: {}, sr2_val: {},imm_val: {}",
+                        "Core {} executing instruction x{:08X} ({:?}) at PC {:08X} in context {} at cycle {}, dr: {}, pre-dr_val: {}, sr1: {}, sr1_val: {}, is_imm: {}, sr2: {}, sr2_val: {},imm_val: {}",
                         self.core_id,
                         instruction_to_execute.raw_instruction,
                         instruction_to_execute.operation,
@@ -1761,6 +1761,8 @@ impl Core {
                         self.context_in_progress,
                         self.cycle,
                         instruction_to_execute.dr,
+                        self.register_file
+                            [self.context_in_progress * CTX_CNT + instruction_to_execute.dr],
                         instruction_to_execute.sr1,
                         self.register_file
                             [self.context_in_progress * CTX_CNT + instruction_to_execute.sr1],
@@ -2356,17 +2358,25 @@ impl Core {
                         let word = self.register_file[instruction_to_execute.dr
                             + self.context_in_progress * REGS_PER_CONTEXT]
                             as u32;
-                        if instruction_to_execute.is_imm {
-                            self.write_sram_word(word, &(instruction_to_execute.imm_0 as u16));
+                        let address = if instruction_to_execute.is_imm {
+                            instruction_to_execute.imm_0 as u16
                         } else {
-                            let address = (self.register_file[instruction_to_execute.sr1
+                            (self.register_file[instruction_to_execute.sr1
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                                 as u32
                                 + instruction_to_execute.imm_0)
-                                as u16;
-                            self.write_sram_word(word, &address);
-                        }
+                                as u16
+                        };
+                        self.write_sram_word(word, &address);
+
                         self.pc[self.context_in_progress] += 4;
+                        if DEBUG
+                                && (core_in_list || cores_to_monitor.len() == 0)
+                                && (*context_to_monitor == self.context_in_progress as i32
+                                    || *context_to_monitor < 0)
+                        {
+                            println!("Local Write to {:0x} - Value: {}", address, word);
+                        }
                     }
                     Operation::LoadByteSigned
                     | Operation::LoadByteUnsigned
@@ -2397,6 +2407,13 @@ impl Core {
                             + instruction_to_execute.dr] = value;
 
                         self.pc[self.context_in_progress] += 4;
+                        if DEBUG
+                                && (core_in_list || cores_to_monitor.len() == 0)
+                                && (*context_to_monitor == self.context_in_progress as i32
+                                    || *context_to_monitor < 0)
+                        {
+                            println!("Local Read from {:0x} - Value: {}", address, value);
+                        }
                     }
                     Operation::AtomicAdd => {
                         if instruction_to_execute.is_imm {
@@ -2717,7 +2734,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 1;
-                            let value = dram[dram_address / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
                             let byte_offset = dram_address % 4;
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
@@ -2770,7 +2787,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 1;
-                            let value = dram[dram_address / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
                             let byte_offset = dram_address % 4;
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
@@ -2825,7 +2842,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 2;
-                            let value = dram[dram_address / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
                             let byte_offset = dram_address & 0x2; //will be either 0 or 2
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
@@ -2881,7 +2898,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 2;
-                            let value = dram[dram_address / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
 
                             let byte_offset = dram_address & 0x2; //will be either 0 or 2
                             let load_dispatch = PipelineStage {
@@ -2939,7 +2956,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 4;
-                            let value = dram[dram_address / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
                                 calculated_val: value,

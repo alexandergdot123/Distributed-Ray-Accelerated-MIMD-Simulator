@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -121,6 +122,11 @@ def main():
     with open(out, "w") as f:
         f.write(rust_code)
     print(f"\nWrote {out}")
+
+    subprocess.run(
+        ["cargo", "run"],
+        cwd=os.path.join(os.path.dirname(__file__), "..", "..", "..", "rust_rt_arch_sim", "src")
+    )
 
 
 if __name__ == "__main__":

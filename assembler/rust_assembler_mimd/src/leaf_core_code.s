@@ -1,4 +1,4 @@
-.org 44 //TODO
+.org 0x2C //TODO
 
 
 
@@ -14,6 +14,7 @@
     .data -1
     NODE_INDEX_OF_ROOT:
     .data -1
+    beq r15, r15, download_bvh_tree, true
 SWITCH_DRAM_QUEUE:
     lw r12, NODE_ID_TABLE_HIGH
     setmembits r12
@@ -1840,21 +1841,23 @@ download_bvh_tree:
     # set_address_bits(self.node_array_high);
     lw r12, NODE_ARRAY_HIGH
     setmembits r11, r12                      # r11 = old membits (ignored), membits = node_array_high
+    lw r12, NODE_ARRAY_LOW
 
     # stack_top = DFS_STACK;
     add r2, r14, DFS_STACK                   # r2 = stack_top
 
     # -- push root onto stack --
     lw r9, NODE_INDEX_OF_ROOT
-    or r11, r11, 0xFFFF
+    and r11, r11, 0
 FIND_BRANCH_NODE:
     mul r9, r9, 48
     add r9, r9, r12
-    lw_d r10, r9, 36
+    lw_d r10, r9, 32
     beq r11, r10, FOUND_BRANCH_CORE_NODE, false
     lw_d r9, r9, 28                        # parent index
     beq r15, r15, FIND_BRANCH_NODE, true
 FOUND_BRANCH_CORE_NODE:
+    lw_d r10, r9, 36
     sw r10, r2, 0                            # dram_idx = 0
     or r11, r14, 0xFFFF
     sh r11, r2, 4                            # parent_ptr = 0xFFFF (null sentinel)

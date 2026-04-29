@@ -1,14 +1,14 @@
+use crate::auto_gen_code::get_init_vector;
 use crate::core::{
     BidirectionalNoc, CORES_IN_X, CORES_IN_Y, Core, DEBUG, DRAM_LATENCY_FAR, DRAM_STACK_SIZE,
     Feeder, LongDramOp, LongDramRequest, NOC_FIFO_LATENCY, NOC_FIFO_SIZE, Operation, SpscQueue,
 };
 use crate::matrices::{MAT_A, MAT_B, MAT_C};
-use crate::auto_gen_code::{get_init_vector};
 use crate::parse_bvh::assemble_tree;
+pub mod auto_gen_code;
 pub mod core;
 pub mod matrices;
 pub mod parse_bvh;
-pub mod auto_gen_code;
 use half::f16;
 use hashbrown::HashMap;
 use rand::rngs::StdRng;
@@ -26,7 +26,6 @@ use std::fs::create_dir_all;
 const CORES_IN_X_STACK: u16 = 4;
 const CORES_IN_Y_STACK: u16 = 2;
 const PRINT_STATS: bool = true;
-
 
 struct Stack {
     cores: Vec<Core>,
@@ -215,7 +214,8 @@ fn dram_read_signed_half(dram: &Vec<u32>, addr: usize) -> u32 {
     assert!(
         addr & 0x1 == 0,
         "DRAM Half LOADS CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
-        addr, addr
+        addr,
+        addr
     );
     let word = dram[dram_word_index(addr)];
     let off = addr & 0x2;
@@ -226,7 +226,8 @@ fn dram_read_unsigned_half(dram: &Vec<u32>, addr: usize) -> u32 {
     assert!(
         addr & 0x1 == 0,
         "DRAM Half LOADS CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
-        addr, addr
+        addr,
+        addr
     );
     let word = dram[dram_word_index(addr)];
     let off = addr & 0x2;
@@ -236,7 +237,8 @@ fn dram_read_word(dram: &Vec<u32>, addr: usize) -> u32 {
     assert!(
         addr & 0x3 == 0,
         "DRAM Word LOADS CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
-        addr, addr
+        addr,
+        addr
     );
     dram[dram_word_index(addr)]
 }
@@ -250,7 +252,8 @@ fn dram_store_half(dram: &mut Vec<u32>, addr: usize, value: u32) {
     assert!(
         addr & 0x1 == 0,
         "DRAM Half STORES CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
-        addr, addr
+        addr,
+        addr
     );
     let idx = dram_word_index(addr);
     let off = addr & 0x2;
@@ -261,7 +264,8 @@ fn dram_store_word(dram: &mut Vec<u32>, addr: usize, value: u32) {
     assert!(
         addr & 0x3 == 0,
         "DRAM Word STORES CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
-        addr, addr
+        addr,
+        addr
     );
     dram[dram_word_index(addr)] = value;
 }
@@ -269,7 +273,8 @@ fn dram_atomic_add(dram: &mut Vec<u32>, addr: usize, value: u32) -> u32 {
     assert!(
         addr & 0x3 == 0,
         "DRAM Word ATOMIC ADD CAN'T BE UNALIGNED (addr = 0x{:X} / {})",
-        addr, addr
+        addr,
+        addr
     );
     let idx = dram_word_index(addr);
     let old = dram[idx];
@@ -598,7 +603,6 @@ fn read_placements(path: String) -> std::io::Result<Vec<(u32, u32, u32)>> {
     Ok(result)
 }
 
-
 fn node_id_lists(path: String) -> std::io::Result<Vec<(u32, u32, u32, u32)>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -607,17 +611,23 @@ fn node_id_lists(path: String) -> std::io::Result<Vec<(u32, u32, u32, u32)>> {
 
     for (i, line) in reader.lines().enumerate() {
         let line = line?;
-        if i == 0 { continue; }
+        if i == 0 {
+            continue;
+        }
 
         let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 5 { continue; }
+        if parts.len() < 5 {
+            continue;
+        }
 
         let kind = parts[3];
         if kind == "empty" || kind.ends_with("_dup") {
             continue;
         }
 
-        let Ok(node_id) = parts[2].parse::<u32>() else { continue };
+        let Ok(node_id) = parts[2].parse::<u32>() else {
+            continue;
+        };
         let x = parts[0].parse::<u32>().unwrap();
         let y = parts[1].parse::<u32>().unwrap();
         let is_branch = if kind.contains("branch") { 1u32 } else { 0u32 };
@@ -651,7 +661,8 @@ pub fn load_triangles() -> Vec<Triangle> {
 
     lines
         .map(|line| {
-            let n: Vec<f32> = line.split_ascii_whitespace()
+            let n: Vec<f32> = line
+                .split_ascii_whitespace()
                 .map(|s| s.parse().unwrap())
                 .collect();
 
@@ -744,11 +755,11 @@ struct BvhLeaf {
 type TriangleVertices = [f32; 9];
 
 fn walk(
-    node_id:   usize,
-    nodes:     &Vec<BvhNode>,
-    leaves:    &Vec<BvhLeaf>,
+    node_id: usize,
+    nodes: &Vec<BvhNode>,
+    leaves: &Vec<BvhLeaf>,
     triangles: &[TriangleVertices],
-    out:       &mut Vec<TriangleVertices>,
+    out: &mut Vec<TriangleVertices>,
 ) {
     let node = &nodes[node_id];
 
@@ -765,9 +776,9 @@ fn walk(
     }
 
     // ---- Internal node: recurse into both children ----
-    let left  = node.left_first;
+    let left = node.left_first;
     let right = node.left_first + 1;
-    walk(left as usize,  nodes, leaves, triangles, out);
+    walk(left as usize, nodes, leaves, triangles, out);
     walk(right as usize, nodes, leaves, triangles, out);
 }
 
@@ -778,12 +789,11 @@ fn walk(
 /// - Dedupes vertices by quantizing to WELD_EPSILON.
 /// - Emits 3 indices per triangle in traversal order.
 fn indexed_mesh_for_node(
-    node_id:   usize,
-    nodes:     &Vec<BvhNode>,
-    leaves:    &Vec<BvhLeaf>,
+    node_id: usize,
+    nodes: &Vec<BvhNode>,
+    leaves: &Vec<BvhLeaf>,
     triangles: &[TriangleVertices],
 ) -> (Vec<(u32, u16, u16, u16)>, Vec<[f32; 3]>) {
-
     // Gather all triangles under this subtree, in left-to-right leaf order.
     let mut tris: Vec<TriangleVertices> = Vec::new();
     walk(node_id, nodes, leaves, triangles, &mut tris);
@@ -791,9 +801,9 @@ fn indexed_mesh_for_node(
     let inv_eps = 1.0 / WELD_EPSILON;
     let quantize = |x: f32| -> i32 { (x * inv_eps).round() as i32 };
 
-    let mut vertex_map: HashMap<[i32; 3], u32>           = HashMap::new();
-    let mut vertices:   Vec<[f32; 3]>                    = Vec::new();
-    let mut indices:    Vec<(u32, u16, u16, u16)>        = Vec::with_capacity(tris.len());
+    let mut vertex_map: HashMap<[i32; 3], u32> = HashMap::new();
+    let mut vertices: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<(u32, u16, u16, u16)> = Vec::with_capacity(tris.len());
 
     for (tri_num, tri) in tris.iter().enumerate() {
         // Three corner indices for this triangle.
@@ -825,8 +835,6 @@ fn indexed_mesh_for_node(
     (indices, vertices)
 }
 
-
-
 use std::fs;
 
 fn parse_bvh_nodes(path: &str) -> Vec<BvhNode> {
@@ -842,19 +850,23 @@ fn parse_bvh_nodes(path: &str) -> Vec<BvhNode> {
         //   [0]   [1]   [2]    [3]   [4]   [5]    [6]         [7]
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 8 {
-            panic!("bvh_nodes.txt line {}: expected 8 fields, got {}", line_no, parts.len());
+            panic!(
+                "bvh_nodes.txt line {}: expected 8 fields, got {}",
+                line_no,
+                parts.len()
+            );
         }
 
         nodes.push(BvhNode {
-            min_x:      parts[1].parse().unwrap(),
-            min_y:      parts[2].parse().unwrap(),
-            min_z:      parts[3].parse().unwrap(),
-            max_x:      parts[4].parse().unwrap(),
-            max_y:      parts[5].parse().unwrap(),
-            max_z:      parts[6].parse().unwrap(),
+            min_x: parts[1].parse().unwrap(),
+            min_y: parts[2].parse().unwrap(),
+            min_z: parts[3].parse().unwrap(),
+            max_x: parts[4].parse().unwrap(),
+            max_y: parts[5].parse().unwrap(),
+            max_z: parts[6].parse().unwrap(),
             left_first: parts[7].parse().unwrap(),
-            tri_count:  parts[8].parse().unwrap(),
-            parent:     0,  // filled in below
+            tri_count: parts[8].parse().unwrap(),
+            parent: 0, // filled in below
         });
     }
 
@@ -867,8 +879,12 @@ fn parse_bvh_nodes(path: &str) -> Vec<BvhNode> {
         if nodes[i].tri_count == 0 {
             let l = nodes[i].left_first as usize;
             let r = l + 1;
-            if l < n { nodes[l].parent = i as u32; }
-            if r < n { nodes[r].parent = i as u32; }
+            if l < n {
+                nodes[l].parent = i as u32;
+            }
+            if r < n {
+                nodes[r].parent = i as u32;
+            }
         }
     }
 
@@ -892,18 +908,35 @@ fn parse_bvh_leaves(path: &str) -> Vec<BvhLeaf> {
         // Format: leaf_id  first_tri  tri_count
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
-            panic!("bvh_leaves.txt line {}: expected 3 fields, got {}", line_no, parts.len());
+            panic!(
+                "bvh_leaves.txt line {}: expected 3 fields, got {}",
+                line_no,
+                parts.len()
+            );
         }
-        let leaf_id:   usize = parts[0].parse().unwrap();
+        let leaf_id: usize = parts[0].parse().unwrap();
         let first_tri: usize = parts[1].parse().unwrap();
         let tri_count: usize = parts[2].parse().unwrap();
 
-        if leaf_id > max_id { max_id = leaf_id; }
-        entries.push((leaf_id, BvhLeaf { first_tri, tri_count }));
+        if leaf_id > max_id {
+            max_id = leaf_id;
+        }
+        entries.push((
+            leaf_id,
+            BvhLeaf {
+                first_tri,
+                tri_count,
+            },
+        ));
     }
 
-    let mut leaves: Vec<BvhLeaf> =
-        vec![BvhLeaf { first_tri: 0, tri_count: 0 }; max_id + 1];
+    let mut leaves: Vec<BvhLeaf> = vec![
+        BvhLeaf {
+            first_tri: 0,
+            tri_count: 0
+        };
+        max_id + 1
+    ];
     for (id, leaf) in entries {
         leaves[id] = leaf;
     }
@@ -922,7 +955,11 @@ fn parse_triangles(path: &str) -> Vec<TriangleVertices> {
         // the triangle's index is just its position in the file.
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 9 {
-            panic!("bvh_triangles.txt line {}: expected 9 fields, got {}", line_no, parts.len());
+            panic!(
+                "bvh_triangles.txt line {}: expected 9 fields, got {}",
+                line_no,
+                parts.len()
+            );
         }
         let mut vals = [0f32; 9];
         for i in 0..9 {
@@ -933,13 +970,9 @@ fn parse_triangles(path: &str) -> Vec<TriangleVertices> {
     tris
 }
 
-
-
-
 fn main() {
     // assemble_tree("bvh_data".to_string());
     // return;
-
 
     let mut stacks: Vec<Stack> = assemble_stacks();
     let init_vector = get_init_vector();
@@ -964,33 +997,28 @@ fn main() {
     let triangles = load_triangles();
     let starting_tri_array = 100_000_000 / 4;
     for i in 0..triangles.len() {
-        stacks[0].dram_stack[8*i + starting_tri_array] = triangles[i].red.to_bits();
-        stacks[0].dram_stack[8*i + 1 + starting_tri_array] = triangles[i].green.to_bits();
-        stacks[0].dram_stack[8*i + 2 + starting_tri_array] = triangles[i].blue.to_bits();
-        stacks[0].dram_stack[8*i + 3 + starting_tri_array] = triangles[i].roughness.to_bits();
-        stacks[0].dram_stack[8*i + 4 + starting_tri_array] = triangles[i].metallic.to_bits();
-        stacks[0].dram_stack[8*i + 5 + starting_tri_array] = triangles[i].x_norm.to_bits();
-        stacks[0].dram_stack[8*i + 6 + starting_tri_array] = triangles[i].y_norm.to_bits();
-        stacks[0].dram_stack[8*i + 7 + starting_tri_array] = triangles[i].z_norm.to_bits();
+        stacks[0].dram_stack[8 * i + starting_tri_array] = triangles[i].red.to_bits();
+        stacks[0].dram_stack[8 * i + 1 + starting_tri_array] = triangles[i].green.to_bits();
+        stacks[0].dram_stack[8 * i + 2 + starting_tri_array] = triangles[i].blue.to_bits();
+        stacks[0].dram_stack[8 * i + 3 + starting_tri_array] = triangles[i].roughness.to_bits();
+        stacks[0].dram_stack[8 * i + 4 + starting_tri_array] = triangles[i].metallic.to_bits();
+        stacks[0].dram_stack[8 * i + 5 + starting_tri_array] = triangles[i].x_norm.to_bits();
+        stacks[0].dram_stack[8 * i + 6 + starting_tri_array] = triangles[i].y_norm.to_bits();
+        stacks[0].dram_stack[8 * i + 7 + starting_tri_array] = triangles[i].z_norm.to_bits();
     }
 
     let node_vec = load_bvh_nodes();
     let node_array_start = 0;
-    for i in 0..node_vec.len(){
-        stacks[1].dram_stack[12*i + node_array_start] = node_vec[i].min_x.to_bits();
-        stacks[1].dram_stack[12*i + 1 + node_array_start] = node_vec[i].max_x.to_bits();
-        stacks[1].dram_stack[12*i + 2 + node_array_start] = node_vec[i].min_y.to_bits();
-        stacks[1].dram_stack[12*i + 3 + node_array_start] = node_vec[i].max_y.to_bits();
-        stacks[1].dram_stack[12*i + 4 + node_array_start] = node_vec[i].min_z.to_bits();
-        stacks[1].dram_stack[12*i + 5 + node_array_start] = node_vec[i].max_z.to_bits();
-        stacks[1].dram_stack[12*i + 6 + node_array_start] = node_vec[i].left_first;
-        stacks[1].dram_stack[12*i + 7 + node_array_start] = node_vec[i].parent;
+    for i in 0..node_vec.len() {
+        stacks[1].dram_stack[12 * i + node_array_start] = node_vec[i].min_x.to_bits();
+        stacks[1].dram_stack[12 * i + 1 + node_array_start] = node_vec[i].max_x.to_bits();
+        stacks[1].dram_stack[12 * i + 2 + node_array_start] = node_vec[i].min_y.to_bits();
+        stacks[1].dram_stack[12 * i + 3 + node_array_start] = node_vec[i].max_y.to_bits();
+        stacks[1].dram_stack[12 * i + 4 + node_array_start] = node_vec[i].min_z.to_bits();
+        stacks[1].dram_stack[12 * i + 5 + node_array_start] = node_vec[i].max_z.to_bits();
+        stacks[1].dram_stack[12 * i + 6 + node_array_start] = node_vec[i].left_first;
+        stacks[1].dram_stack[12 * i + 7 + node_array_start] = node_vec[i].parent;
     }
-
-
-
-
-
 
     let mut node_id_vec_wrapped = node_id_lists("placement.csv".to_owned());
     if node_id_vec_wrapped.is_err() {
@@ -1002,23 +1030,22 @@ fn main() {
     let mut node_id_hash_map = HashMap::new();
     let mut address_ray_queue_hash_map = HashMap::new();
 
-    let mut ray_queue_allocations: Vec<Vec<u32>> = vec![vec![1_115_000_000, 252_516_352, 100_000_000, 100_000_000],
-        vec![100_000_000, 100_000_000, 100_000_000, 100_000_000]];
-    for i in 0..node_id_vec.len(){
+    let mut ray_queue_allocations: Vec<Vec<u32>> = vec![
+        vec![1_115_000_000, 252_516_352, 100_000_000, 100_000_000],
+        vec![100_000_000, 100_000_000, 100_000_000, 100_000_000],
+    ];
+    for i in 0..node_id_vec.len() {
         node_id_hash_map.insert(node_id_vec[i].2, (i, node_id_vec[i].3));
-        let mut big_address: u64 = (node_id_vec[i].0 / 32) as u64 + (node_id_vec[i].1 / 32) as u64 * 4;
+        let mut big_address: u64 =
+            (node_id_vec[i].0 / 32) as u64 + (node_id_vec[i].1 / 32) as u64 * 4;
         big_address <<= 31;
-        big_address += ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32] as u64;
-        stacks[0].dram_stack[2*i + start_of_dram_queue_mapping] = (big_address >> 32) as u32;
-        stacks[0].dram_stack[2*i + start_of_dram_queue_mapping + 1] = (big_address) as u32;
+        big_address += ray_queue_allocations[node_id_vec[i].1 as usize / 32]
+            [node_id_vec[i].0 as usize / 32] as u64;
+        stacks[0].dram_stack[2 * i + start_of_dram_queue_mapping] = (big_address >> 32) as u32;
+        stacks[0].dram_stack[2 * i + start_of_dram_queue_mapping + 1] = (big_address) as u32;
         address_ray_queue_hash_map.insert(i, big_address);
-        if big_address > 1<<34 {
-            println!("Alloc point: {}", ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32]);
-            println!("Big address: {}, node_struct: {:?}", big_address, node_id_vec[i]);
-            panic!();
-        }
-        ray_queue_allocations[node_id_vec[i].1 as usize / 32 ][node_id_vec[i].0 as usize / 32] += 64 * 1024;
-
+        ray_queue_allocations[node_id_vec[i].1 as usize / 32][node_id_vec[i].0 as usize / 32] +=
+            64 * 1024;
     }
     println!("Allocating values next to the dram queues");
 
@@ -1026,31 +1053,59 @@ fn main() {
     let node_vec = parse_bvh_nodes("bvh_nodes.txt");
     let leaf_vec = parse_bvh_leaves("bvh_leaves.txt");
     for (_, _, node_id, is_branch) in &node_id_vec {
-        if *is_branch != 0{
+        if *is_branch != 0 {
             continue;
         }
         let i = node_id_hash_map.get(node_id).unwrap().0;
         let address = address_ray_queue_hash_map.get(&i).unwrap();
-        let (indices, vertices) = indexed_mesh_for_node(*node_id as usize, &node_vec, &leaf_vec, &tri_vec);
-        let stack_num = address >> 31 ;
+        let (indices, vertices) =
+            indexed_mesh_for_node(*node_id as usize, &node_vec, &leaf_vec, &tri_vec);
+        let stack_num = address >> 31;
         let intra_stack_addr = address & 0x7FFF_FFFF;
         let mut address_inc = 8 + 32612;
-        dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc - 8, indices.len() as u32 * 12);
-        dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc - 4, vertices.len() as u32 * 12);
+        dram_store_word(
+            &mut stacks[stack_num as usize].dram_stack,
+            intra_stack_addr as usize + address_inc - 8,
+            indices.len() as u32 * 12,
+        );
+        dram_store_word(
+            &mut stacks[stack_num as usize].dram_stack,
+            intra_stack_addr as usize + address_inc - 4,
+            vertices.len() as u32 * 12,
+        );
 
-        for index_set in indices{
-            dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc, index_set.0);
-            dram_store_half(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc + 4, index_set.1 as u32);
-            dram_store_half(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc + 6, index_set.2 as u32);
-            dram_store_half(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc + 8, index_set.3 as u32);
+        for index_set in indices {
+            dram_store_word(
+                &mut stacks[stack_num as usize].dram_stack,
+                intra_stack_addr as usize + address_inc,
+                index_set.0,
+            );
+            dram_store_half(
+                &mut stacks[stack_num as usize].dram_stack,
+                intra_stack_addr as usize + address_inc + 4,
+                index_set.1 as u32,
+            );
+            dram_store_half(
+                &mut stacks[stack_num as usize].dram_stack,
+                intra_stack_addr as usize + address_inc + 6,
+                index_set.2 as u32,
+            );
+            dram_store_half(
+                &mut stacks[stack_num as usize].dram_stack,
+                intra_stack_addr as usize + address_inc + 8,
+                index_set.3 as u32,
+            );
 
-            address_inc+=12;
+            address_inc += 12;
         }
         for vertex in vertices {
-            for float in vertex{
-                dram_store_word(&mut stacks[stack_num as usize].dram_stack, intra_stack_addr as usize + address_inc, float.to_bits());
-                address_inc+=4;
-
+            for float in vertex {
+                dram_store_word(
+                    &mut stacks[stack_num as usize].dram_stack,
+                    intra_stack_addr as usize + address_inc,
+                    float.to_bits(),
+                );
+                address_inc += 4;
             }
         }
     }
@@ -1058,21 +1113,32 @@ fn main() {
     let start_of_node_init_table = 20_000 / 4;
 
     let placement_vec = placement_vec_wrapped.unwrap();
-    for i in 0..8192{
+    for i in 0..8192 {
         let (x, y, node_id) = placement_vec[i];
         let index = y * 128 + x;
-        stacks[0].dram_stack[2* index as usize + start_of_node_init_table] = node_id_hash_map.get(&node_id).unwrap().0 as u32;
-        stacks[0].dram_stack[2* index as usize + start_of_node_init_table + 1] = (node_id_hash_map.get(&node_id).unwrap().1 << 31) | node_id;
+        stacks[0].dram_stack[2 * index as usize + start_of_node_init_table] =
+            node_id_hash_map.get(&node_id).unwrap().0 as u32;
+        stacks[0].dram_stack[2 * index as usize + start_of_node_init_table + 1] =
+            (node_id_hash_map.get(&node_id).unwrap().1 << 31) | node_id;
     }
 
-
-    for i in 0..node_id_vec.len(){
+    for i in 0..node_id_vec.len() {
         let (_x, _y, node_id, is_branch) = node_id_vec[i];
         let address = node_id_hash_map.get(&node_id).unwrap().0;
+        stacks[1].dram_stack[12 * node_id as usize + 8 + node_array_start] = is_branch;
         stacks[1].dram_stack[12 * node_id as usize + 9 + node_array_start] = address as u32;
-        dram_store_half(&mut stacks[1].dram_stack, 4*(12 * node_id as usize + node_array_start) + 40, (address >> 32) as u32);
-        dram_store_half(&mut stacks[1].dram_stack, 4*(12 * node_id as usize + node_array_start) + 42, is_branch);
-        stacks[1].dram_stack[12 * node_id as usize + 11 + node_array_start] = node_id_hash_map.get(&node_id).unwrap().1;
+        dram_store_half(
+            &mut stacks[1].dram_stack,
+            4 * (12 * node_id as usize + node_array_start) + 40,
+            (address >> 32) as u32,
+        );
+        dram_store_half(
+            &mut stacks[1].dram_stack,
+            4 * (12 * node_id as usize + node_array_start) + 42,
+            is_branch,
+        );
+        stacks[1].dram_stack[12 * node_id as usize + 11 + node_array_start] =
+            node_id_hash_map.get(&node_id).unwrap().1;
     }
 
     let start_of_random_table = 60_000_004 / 4;
@@ -1189,9 +1255,16 @@ fn main() {
     io::stdin().read_line(&mut input).unwrap();
     let context_to_watch = match input.trim() {
         "" => -1,
-        s => s.parse::<i32>().ok().filter(|&n| (0..=15).contains(&n)).unwrap_or(-1),
+        s => s
+            .parse::<i32>()
+            .ok()
+            .filter(|&n| (0..=15).contains(&n))
+            .unwrap_or(-1),
     };
-    println!("Context to watch: {}, cores to watch: {:?}", context_to_watch, cores_to_watch);
+    println!(
+        "Context to watch: {}, cores to watch: {:?}",
+        context_to_watch, cores_to_watch
+    );
     for (stack_num, mut stack) in stacks.into_iter().enumerate() {
         let barrier = barrier.clone();
         let done_per_thread = done.clone();
@@ -1201,7 +1274,12 @@ fn main() {
                 let mut local_read = 0;
                 let mut local_write = 0;
                 for core in stack.cores.iter_mut() {
-                    core.tick(&mut stack.dram_stack, &cores_to_monitor, &context_to_watch);
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        core.tick(&mut stack.dram_stack, &cores_to_monitor, &context_to_watch);
+                    }));
+                    if let Err(e) = result {
+                        panic!("Core {} panicked: {:?}", core.get_core_id(), e);
+                    }
                     local_read += core.get_local_read();
                     local_write += core.get_local_write();
                 }
