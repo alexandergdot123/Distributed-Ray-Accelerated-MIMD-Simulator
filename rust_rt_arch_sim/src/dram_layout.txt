@@ -1,8 +1,7 @@
 DRAM:
 0: First word: num words for init core
 4-400: Instructions for initialize core
-400 - 10000: branch core instruction code
-10000 - 20000: branch core instruction code
+400 - 20000: branch core instruction code
 20_000 - 85_536: Initialize Cores with Node IDs array
 100_000 - 132_768: INV_SQRT_TABLE
 150_000 - 160_240: INT_TO_FLOAT_TABLE
@@ -10,7 +9,7 @@ DRAM:
 60_000_000: Random table counter # TODO ask alex
 60_000_004 - 60_262_148: Random Table
 61_000_000 - 61_008_192: Div Table
-
+61_010_000 - 61_030_000: Leaf Core Code
 62_000_000 - 62_000_268: Emergency Queue
 
 62_001_000 - 62_066_548: Tile Queue
