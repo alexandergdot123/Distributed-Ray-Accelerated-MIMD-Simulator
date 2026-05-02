@@ -1420,22 +1420,22 @@ fn main() {
     for i in 0..2 {
         stacks[i * 4].dram_stack[idle_tree_level_2] = ((i >> 1) as u32) & 3; // parent_high
         stacks[i * 4].dram_stack[idle_tree_level_2 + 1] = 63_400_200; // parent_low
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 2] = (i as u32) * 2; // left_high
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 3] = (63_400_000) / 4; // left_low
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 4] = (i as u32) * 2 | 1; // right_high
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 5] = (63_400_000 | (1 << 31)) / 4; // right_low
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 6] = 0 | 1; // is_left = 0 for root
+        stacks[i * 4].dram_stack[idle_tree_level_2 + 2] = (i as u32) * 2; // left_high
+        stacks[i * 4].dram_stack[idle_tree_level_2 + 3] = (63_400_000) / 4; // left_low
+        stacks[i * 4].dram_stack[idle_tree_level_2 + 4] = (i as u32) * 2 | 1; // right_high
+        stacks[i * 4].dram_stack[idle_tree_level_2 + 5] = (63_400_000 | (1 << 31)) / 4; // right_low
+        stacks[i * 4].dram_stack[idle_tree_level_2 + 6] = 0 | 1; // is_left = 0 for root
     }
 
-    let idle_tree_level_2 = 63_400_200 / 4;
+    let idle_tree_level_3 = 63_400_200 / 4;
     for i in 0..1 {
-        stacks[i * 8].dram_stack[idle_tree_level_2] = 0; // parent_high
-        stacks[i * 8].dram_stack[idle_tree_level_2 + 1] = 0; // parent_low
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 2] = 0; // left_high
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 3] = (63_400_100) / 4; // left_low
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 4] = 1; // right_high
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 5] = (63_400_100) / 4; // right_low
-        stacks[i * 4].dram_stack[idle_tree_level_1 + 6] = 0 | 2; // is_left = 0 for root
+        stacks[i * 8].dram_stack[idle_tree_level_3] = 0; // parent_high
+        stacks[i * 8].dram_stack[idle_tree_level_3 + 1] = 0; // parent_low
+        stacks[i * 4].dram_stack[idle_tree_level_3 + 2] = 0; // left_high
+        stacks[i * 4].dram_stack[idle_tree_level_3 + 3] = (63_400_100) / 4; // left_low
+        stacks[i * 4].dram_stack[idle_tree_level_3 + 4] = 1; // right_high
+        stacks[i * 4].dram_stack[idle_tree_level_3 + 5] = (63_400_100) / 4; // right_low
+        stacks[i * 4].dram_stack[idle_tree_level_3 + 6] = 0 | 2; // is_left = 0 for root
     }
 
     
