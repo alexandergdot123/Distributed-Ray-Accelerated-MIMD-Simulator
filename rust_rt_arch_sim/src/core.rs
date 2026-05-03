@@ -601,6 +601,7 @@ fn decode_instruction(instruction_word: u32, pc: u16) -> DecodedInstruction {
         53 => Operation::BranchLTEU,
         54 => Operation::BranchGTU,
         55 => Operation::DisableInterrupts,
+        56 => Operation::SwitchCtx,
         _ => panic!(
             "UNKNOWN OPERATION: opcode = {} (0x{:02X}), full word = 0x{:08X}",
             instruction_word & 0x7F,

@@ -1521,6 +1521,9 @@ fn main() {
                     }
                     local_read += core.get_local_read();
                     local_write += core.get_local_write();
+                    if core.get_core_id() == 2944 {
+                        println!("HEAD: {}, TAIL: {}, CNT: {}, CORE: {}", stack.dram_stack[1163234496/4], stack.dram_stack[1163234496/4 + 1], stack.dram_stack[1163234496/4 + 2], 2944);  
+                    }
                 }
                 stack.local_read = local_read;
                 stack.local_write = local_write;

@@ -651,19 +651,20 @@ REJECT_PATH:
     lhu r8, r1, 40                  # r8 = node->queue_high_bit_addr
     setmembits r8                   # set address bits to reach node's DRAM stack
     lw r9, r1, 36                   # r9 = node->queue_low_bit_addr
-
+    and r7, r7, 0
+    add r9, r9, 8
 ENSURE_SPACE_IN_QUEUE:
-    lw_d r10, r9, -12               # r10 = cur_ray_count (count field is -12 from here)
-    and r11, r11, 0
-    add r11, r11, 255               # r11 = 255
-    bgt r10, r11, ENSURE_SPACE_IN_QUEUE, true   # spin while count > 255
-
-    add r9, r9, -16                 # r9 = queue base (tail field)
+    atomadd_d r10, r9, 1
+    add r8, r7, 255
+    blte r10, r8, SPACE_IN_DRAM_QUEUE_FOR_SEND, true
+    atomadd_d r15, r9, -1
+    bgt r15, r15, ENSURE_SPACE_IN_QUEUE, true   # spin while count > 255
+SPACE_IN_DRAM_QUEUE_FOR_SEND:
+    add r9, r9, -4                 # r9 = queue base (tail field)
     atomadd_d r10, r9, 64           # r10 = old tail, advance tail by 64 bytes
     and r10, r10, 0x3FFF            # r10 = tail & 0x3FFF (ring mask)
     add r11, r9, 16224                # r11 = queue base + 536 (start of ray slots)
     add r11, r11, r10               # r11 = write_addr = slot base + tail offset
-    and r7, r7, 0
 WAIT_FOR_SLOT_TO_OPEN:
     lbu_d r10, r11, 63              # r10 = slot[63] (valid byte)
     bne r10, r7, WAIT_FOR_SLOT_TO_OPEN, true   # spin while slot occupied (r7=0)
@@ -887,7 +888,7 @@ DECREMENT_PENDING:
     and r10, r15, 0xF               # r10 = thread_id
     and r11, r10, 1                 # r11 = thread_id & 1
     add r11, r11, 32                # r11 = interrupt mailbox index
-    intdis r11                      # disable interrupts
+    intena r11                      # disable interrupts
     and r14, r14, 0
     add r8, r14, RAY_SEND_PENDING_ADDR    # r8 = &ray_send_pending
     atomadd r9, r8, -1              # decrement pending count
@@ -1442,6 +1443,7 @@ WAIT_FOR_TILE_SLOT_TO_OPEN:
     add r4, r14, 1
     sb r4, r3, 16
     sw r4, r2, 32                         # cur_ray_spawned_from_tile[thread_id] = 1
+    sw r4, TILE_IS_ACTIVE
 
     setctx 16                            # set_ctx(16)
     relinquish false                     # relinquish_ownership(0)
