@@ -923,15 +923,17 @@ impl Core {
     }
     fn write_sram_byte(&mut self, byte: u8, address: &u16) {
         assert!(
-            *address as usize <= SRAM_SIZE ,
-            "SRAM WRITE OUT OF BOUNDS, core: {}", self.core_id
+            *address as usize <= SRAM_SIZE,
+            "SRAM WRITE OUT OF BOUNDS, core: {}",
+            self.core_id
         );
         self.sram[*address as usize] = byte;
     }
     fn write_sram_half(&mut self, half: u16, address: &u16) {
         assert!(
-            *address as usize <= SRAM_SIZE ,
-            "SRAM WRITE OUT OF BOUNDS, core: {}", self.core_id
+            *address as usize <= SRAM_SIZE,
+            "SRAM WRITE OUT OF BOUNDS, core: {}",
+            self.core_id
         );
         assert!(*address & 0x1 == 0, "HALF NOT ALIGNED!");
         self.sram[*address as usize] = (half & 0xFF) as u8;
@@ -939,37 +941,55 @@ impl Core {
     }
     fn write_sram_word(&mut self, word: u32, address: &u16) {
         assert!(
-            *address as usize <= SRAM_SIZE ,
-            "SRAM WRITE OUT OF BOUNDS, core: {}", self.core_id
+            *address as usize <= SRAM_SIZE,
+            "SRAM WRITE OUT OF BOUNDS, core: {}",
+            self.core_id
         );
         if *address & 0x3 != 0 {
             self.dump_instruction(&self.decoded_instruction.unwrap());
-            assert!(*address & 0x3 == 0, "WORD NOT ALIGNED!, core: {}", self.core_id);
+            assert!(
+                *address & 0x3 == 0,
+                "WORD NOT ALIGNED!, core: {}",
+                self.core_id
+            );
         }
         self.sram[*address as usize] = (word & 0xFF) as u8;
         self.sram[*address as usize + 1] = ((word & 0xFF00) >> 8) as u8;
         self.sram[*address as usize + 2] = ((word & 0xFF0000) >> 16) as u8;
         self.sram[*address as usize + 3] = ((word & 0xFF000000) >> 24) as u8;
+        // if *address < 2010 && *address > 2000 {
+        //     println!("Write to address: {} was successful", address);
+        // }
     }
-    fn read_sram_byte_unsigned(&self, address: &u16) -> u32 {
+    pub fn read_sram_byte_unsigned(&self, address: &u16) -> u32 {
         let index = *address as usize;
         *self.sram.get(index).expect(&format!("Failed to read SRAM byte unsigned at PC 0x{:08X}, index out of bounds: tried to access index {} when SRAM size is {}", self.pc[self.context_in_progress], index, SRAM_SIZE)) as u32
     }
-    
-    fn read_sram_byte_signed(&self, address: &u16) -> u32 {
+
+    pub fn read_sram_byte_signed(&self, address: &u16) -> u32 {
         let index = *address as usize;
         ((*self.sram.get(index).expect(&format!("Failed to read SRAM byte signed at PC 0x{:08X}, index out of bounds: tried to access index {} when SRAM size is {}", self.pc[self.context_in_progress], index, SRAM_SIZE)) as i8) as i32) as u32
     }
-    fn read_sram_half_unsigned(&self, address: &u16) -> u32 {
-        assert!(*address & 0x1 == 0, "UNSIGNED HALF NOT ALIGNED! at PC 0x{:08X} on core {}", self.pc[self.context_in_progress], self.core_id);
+    pub fn read_sram_half_unsigned(&self, address: &u16) -> u32 {
+        assert!(
+            *address & 0x1 == 0,
+            "UNSIGNED HALF NOT ALIGNED! at PC 0x{:08X} on core {}",
+            self.pc[self.context_in_progress],
+            self.core_id
+        );
         let index_low = *address as usize;
         let index_high = index_low + 1;
         let low_half = *self.sram.get(index_low).expect(&format!("Failed to read SRAM half unsigned at PC 0x{:08X}, index out of bounds (low byte): tried to access index {} when SRAM size is {}", self.pc[self.context_in_progress], index_low, SRAM_SIZE)) as u32;
         let high_half = (*self.sram.get(index_high).expect(&format!("Failed to read SRAM half unsigned at PC 0x{:08X}, index out of bounds (high byte): tried to access index {} when SRAM size is {}", self.pc[self.context_in_progress], index_high, SRAM_SIZE)) as u32) << 8;
         low_half | high_half
     }
-    fn read_sram_half_signed(&self, address: &u16) -> u32 {
-        assert!(*address & 0x1 == 0, "SIGNED HALF NOT ALIGNED! at PC 0x{:08X} on core {}", self.pc[self.context_in_progress], self.core_id);
+    pub fn read_sram_half_signed(&self, address: &u16) -> u32 {
+        assert!(
+            *address & 0x1 == 0,
+            "SIGNED HALF NOT ALIGNED! at PC 0x{:08X} on core {}",
+            self.pc[self.context_in_progress],
+            self.core_id
+        );
         let index_low = *address as usize;
         let index_high = index_low + 1;
         let lo = *self.sram.get(index_low).expect(&format!("Failed to read SRAM half signed at PC 0x{:08X}, index out of bounds (low byte): tried to access index {} when SRAM size is {}", self.pc[self.context_in_progress], index_low, SRAM_SIZE));
@@ -978,8 +998,14 @@ impl Core {
         let val = u16::from_le_bytes([lo, hi]) as i16;
         val as i32 as u32
     }
-    fn read_sram_word(&self, address: &u16) -> u32 {
-        assert!(address & 0x3 == 0, "WORD NOT ALIGNED! address = 0x{:04X} ({}), core_id: {}", address, address, self.core_id);
+    pub fn read_sram_word(&self, address: &u16) -> u32 {
+        assert!(
+            address & 0x3 == 0,
+            "WORD NOT ALIGNED! address = 0x{:04X} ({}), core_id: {}",
+            address,
+            address,
+            self.core_id
+        );
         let index0 = *address as usize;
         let index1 = index0 + 1;
         let index2 = index0 + 2;
@@ -1776,7 +1802,7 @@ impl Core {
                         || *context_to_monitor < 0)
                 {
                     println!(
-                        "Core {} executing instruction x{:08X} ({:?}) at PC {:08X} in context {} at cycle {}, dr: {}, pre-dr_val: {}, sr1: {}, sr1_val: {}, is_imm: {}, sr2: {}, sr2_val: {},imm_val: {}",
+                        "Core {} executing instruction x{:08X} ({:?}) at PC 0x{:08X} in context {} at cycle: {}, dr: {}, pre-dr_val: {}, sr1: {}, sr1_val: {}, is_imm: {}, sr2: {}, sr2_val: {},imm_val: {}",
                         self.core_id,
                         instruction_to_execute.raw_instruction,
                         instruction_to_execute.operation,
@@ -1813,7 +1839,6 @@ impl Core {
                                 .wrapping_add(sr2_val as i32)) as u32;
 
                         self.pc[self.context_in_progress] += 4;
-
                     }
                     Operation::Sub => {
                         let sr2_val = if instruction_to_execute.is_imm {
@@ -1895,7 +1920,6 @@ impl Core {
                         self.pc[self.context_in_progress] += 4;
                     }
                     Operation::Srl => {
-
                         let sr2_val = if instruction_to_execute.is_imm {
                             instruction_to_execute.imm_0
                         } else {
@@ -1907,11 +1931,13 @@ impl Core {
                             [instruction_to_execute.sr1
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                             >> sr2_val;
-                        if DEBUG && (core_in_list || cores_to_monitor.len() == 0)
+                        if DEBUG
+                            && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
-                            || *context_to_monitor < 0) {
+                                || *context_to_monitor < 0)
+                        {
                             if 0x1698 == self.pc[self.context_in_progress] {
-                                println!("Node ID taken ALEX: {}",  self.register_file[11]);
+                                println!("Node ID taken ALEX: {}", self.register_file[11]);
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
@@ -2361,6 +2387,17 @@ impl Core {
                             as u8;
                         if instruction_to_execute.is_imm {
                             self.write_sram_byte(byte, &(instruction_to_execute.imm_0 as u16));
+                            if DEBUG
+                                && (core_in_list || cores_to_monitor.len() == 0)
+                                && (*context_to_monitor == self.context_in_progress as i32
+                                    || *context_to_monitor < 0)
+                            {
+                                println!(
+                                    "Local Write to {:0x} - Value: {}",
+                                    &(instruction_to_execute.imm_0),
+                                    byte
+                                );
+                            }
                         } else {
                             let address = (self.register_file[instruction_to_execute.sr1
                                 + self.context_in_progress * REGS_PER_CONTEXT]
@@ -2368,6 +2405,13 @@ impl Core {
                                 + instruction_to_execute.imm_0)
                                 as u16;
                             self.write_sram_byte(byte, &address);
+                            if DEBUG
+                                && (core_in_list || cores_to_monitor.len() == 0)
+                                && (*context_to_monitor == self.context_in_progress as i32
+                                    || *context_to_monitor < 0)
+                            {
+                                println!("Local Write to {:0x} - Value: {}", address, byte);
+                            }
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -2375,17 +2419,23 @@ impl Core {
                         let half = self.register_file[instruction_to_execute.dr
                             + self.context_in_progress * REGS_PER_CONTEXT]
                             as u16;
-                        if instruction_to_execute.is_imm {
-                            self.write_sram_half(half, &(instruction_to_execute.imm_0 as u16));
+                        let address = if instruction_to_execute.is_imm {
+                            instruction_to_execute.imm_0 as u16
                         } else {
-                            let address = (self.register_file[instruction_to_execute.sr1
+                            (self.register_file[instruction_to_execute.sr1
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                                 as u32
-                                + instruction_to_execute.imm_0)
-                                as u16;
-                            self.write_sram_half(half, &address);
-                        }
+                                + instruction_to_execute.imm_0) as u16
+                        };
+                        self.write_sram_half(half, &(address));
                         self.pc[self.context_in_progress] += 4;
+                        if DEBUG
+                            && (core_in_list || cores_to_monitor.len() == 0)
+                            && (*context_to_monitor == self.context_in_progress as i32
+                                || *context_to_monitor < 0)
+                        {
+                            println!("Local Write to {:0x} - Value: {}", address, half);
+                        }
                     }
                     Operation::StoreWord => {
                         let word = self.register_file[instruction_to_execute.dr
@@ -2397,16 +2447,15 @@ impl Core {
                             (self.register_file[instruction_to_execute.sr1
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                                 as u32
-                                + instruction_to_execute.imm_0)
-                                as u16
+                                + instruction_to_execute.imm_0) as u16
                         };
                         self.write_sram_word(word, &address);
 
                         self.pc[self.context_in_progress] += 4;
                         if DEBUG
-                                && (core_in_list || cores_to_monitor.len() == 0)
-                                && (*context_to_monitor == self.context_in_progress as i32
-                                    || *context_to_monitor < 0)
+                            && (core_in_list || cores_to_monitor.len() == 0)
+                            && (*context_to_monitor == self.context_in_progress as i32
+                                || *context_to_monitor < 0)
                         {
                             if self.pc[self.context_in_progress] == 0x1728 {
                                 println!("End of dfs download");
@@ -2419,7 +2468,6 @@ impl Core {
                     | Operation::LoadHalfSigned
                     | Operation::LoadHalfUnsigned
                     | Operation::LoadWord => {
-
                         let address = if instruction_to_execute.imm_1 != 0 {
                             instruction_to_execute.imm_0 as u16
                         } else {
@@ -2447,13 +2495,12 @@ impl Core {
                         if DEBUG
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
-                            || *context_to_monitor < 0)
+                                || *context_to_monitor < 0)
                         {
                             println!("Local Read from {:0x} - Value: {}", address, value);
                             if self.pc[self.context_in_progress] == 0x1514 {
                                 println!("NODE_ID EXAMINED: {}", value);
                             }
-
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -2478,39 +2525,47 @@ impl Core {
                                 || *context_to_monitor < 0)
                         {
                             println!("Local Atomadd from {:0x} - Old Value: {}", address, old_val);
-                            if self.pc[self.context_in_progress] == 0x1D80{
+                            if self.pc[self.context_in_progress] == 0x1D80 {
                                 println!("DFS ALLOC HERE");
                             }
                         }
                         self.pc[self.context_in_progress] += 4;
-
-
                     }
                     Operation::BranchEq => {
-                        if DEBUG && (core_in_list || cores_to_monitor.len() == 0)
+                        if DEBUG
+                            && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
-                            || *context_to_monitor < 0) {
-                            if self.pc[self.context_in_progress] == 0x102C{
-                                let base = self.register_file[self.context_in_progress * REGS_PER_CONTEXT] as u16;
+                                || *context_to_monitor < 0)
+                        {
+                            if self.pc[self.context_in_progress] == 0x102C {
+                                let base = self.register_file
+                                    [self.context_in_progress * REGS_PER_CONTEXT]
+                                    as u16;
 
-                                let read_word = |s: &mut Self, off: u16| s.read_sram_word(&base.wrapping_add(off));
-                                let read_half = |s: &mut Self, off: u16| s.read_sram_half_unsigned(&base.wrapping_add(off));
-                                let read_byte = |s: &mut Self, off: u16| s.read_sram_byte_unsigned(&base.wrapping_add(off));
+                                let read_word = |s: &mut Self, off: u16| {
+                                    s.read_sram_word(&base.wrapping_add(off))
+                                };
+                                let read_half = |s: &mut Self, off: u16| {
+                                    s.read_sram_half_unsigned(&base.wrapping_add(off))
+                                };
+                                let read_byte = |s: &mut Self, off: u16| {
+                                    s.read_sram_byte_unsigned(&base.wrapping_add(off))
+                                };
 
-                                let ox     = f32::from_bits(read_word(self,  0));
-                                let oy     = f32::from_bits(read_word(self,  4));
-                                let oz     = f32::from_bits(read_word(self,  8));
-                                let dx     = f32::from_bits(read_word(self, 12));
-                                let dy     = f32::from_bits(read_word(self, 16));
-                                let dz     = f32::from_bits(read_word(self, 20));
+                                let ox = f32::from_bits(read_word(self, 0));
+                                let oy = f32::from_bits(read_word(self, 4));
+                                let oz = f32::from_bits(read_word(self, 8));
+                                let dx = f32::from_bits(read_word(self, 12));
+                                let dy = f32::from_bits(read_word(self, 16));
+                                let dz = f32::from_bits(read_word(self, 20));
                                 let inv_dx = f32::from_bits(read_word(self, 24));
                                 let inv_dy = f32::from_bits(read_word(self, 28));
                                 let inv_dz = f32::from_bits(read_word(self, 32));
-                                let t_max  = f32::from_bits(read_word(self, 36));
+                                let t_max = f32::from_bits(read_word(self, 36));
 
                                 let leaf_node_starting_point = read_word(self, 40);
-                                let check_left               = read_word(self, 44);
-                                let check_right              = read_word(self, 48);
+                                let check_left = read_word(self, 44);
+                                let check_right = read_word(self, 48);
 
                                 let pix_x = read_half(self, 52) as u16;
                                 let pix_y = read_half(self, 54) as u16;
@@ -2518,66 +2573,113 @@ impl Core {
                                 let tri_index = read_word(self, 56);
 
                                 let bounce_count = read_byte(self, 60) as u8;
-                                let light_id     = read_byte(self, 61) as u8;
-                                let ray_depth    = read_byte(self, 62) as u8;
-                                let active_ray   = read_byte(self, 63) as u8;
+                                let light_id = read_byte(self, 61) as u8;
+                                let ray_depth = read_byte(self, 62) as u8;
+                                let active_ray = read_byte(self, 63) as u8;
 
                                 println!("Ray @ 0x{:04X} (ctx {})", base, self.context_in_progress);
-                                println!("  origin    = ({:>12.6}, {:>12.6}, {:>12.6})", ox, oy, oz);
-                                println!("  direction = ({:>12.6}, {:>12.6}, {:>12.6})", dx, dy, dz);
-                                println!("  inv_dir   = ({:>12.6}, {:>12.6}, {:>12.6})", inv_dx, inv_dy, inv_dz);
+                                println!(
+                                    "  origin    = ({:>12.6}, {:>12.6}, {:>12.6})",
+                                    ox, oy, oz
+                                );
+                                println!(
+                                    "  direction = ({:>12.6}, {:>12.6}, {:>12.6})",
+                                    dx, dy, dz
+                                );
+                                println!(
+                                    "  inv_dir   = ({:>12.6}, {:>12.6}, {:>12.6})",
+                                    inv_dx, inv_dy, inv_dz
+                                );
                                 println!("  t_max     = {}", t_max);
-                                println!("  leaf_node_starting_point = 0x{:08X}", leaf_node_starting_point);
+                                println!(
+                                    "  leaf_node_starting_point = 0x{:08X}",
+                                    leaf_node_starting_point
+                                );
                                 println!("  check_left  = 0x{:08X}", check_left);
                                 println!("  check_right = 0x{:08X}", check_right);
                                 println!("  pixel       = ({}, {})", pix_x, pix_y);
-                                println!("  tri_index   = 0x{:08X}{}", tri_index,
-                                        if tri_index == 0xFFFF_FFFF { " (no hit)" } else { "" });
+                                println!(
+                                    "  tri_index   = 0x{:08X}{}",
+                                    tri_index,
+                                    if tri_index == 0xFFFF_FFFF {
+                                        " (no hit)"
+                                    } else {
+                                        ""
+                                    }
+                                );
                                 println!("  bounce_count = {}", bounce_count);
                                 println!("  light_id     = {}", light_id);
                                 println!("  ray_depth    = {}", ray_depth);
                                 println!("  active_ray   = {}", active_ray);
                             }
-                            if self.pc[self.context_in_progress] == 0x051C || self.pc[self.context_in_progress] == 0x1E34 {
+                            if self.pc[self.context_in_progress] == 0x051C
+                                || self.pc[self.context_in_progress] == 0x1E34
+                            {
                                 let base = if self.pc[self.context_in_progress] != 0x1E34 {
-                                    self.register_file[self.context_in_progress * REGS_PER_CONTEXT + 1] as u16} else {
-                                        self.register_file[self.context_in_progress * REGS_PER_CONTEXT + 13] as u16
-                                    };
+                                    self.register_file
+                                        [self.context_in_progress * REGS_PER_CONTEXT + 1]
+                                        as u16
+                                } else {
+                                    self.register_file
+                                        [self.context_in_progress * REGS_PER_CONTEXT + 13]
+                                        as u16
+                                };
 
-                                let read_word = |s: &mut Self, off: u16| s.read_sram_word(&base.wrapping_add(off));
-                                let read_half = |s: &mut Self, off: u16| s.read_sram_half_unsigned(&base.wrapping_add(off));
-                                let read_byte = |s: &mut Self, off: u16| s.read_sram_byte_unsigned(&base.wrapping_add(off));
+                                let read_word = |s: &mut Self, off: u16| {
+                                    s.read_sram_word(&base.wrapping_add(off))
+                                };
+                                let read_half = |s: &mut Self, off: u16| {
+                                    s.read_sram_half_unsigned(&base.wrapping_add(off))
+                                };
+                                let read_byte = |s: &mut Self, off: u16| {
+                                    s.read_sram_byte_unsigned(&base.wrapping_add(off))
+                                };
 
-                                let x_min = f32::from_bits(read_word(self,  0));
-                                let x_max = f32::from_bits(read_word(self,  4));
-                                let y_min = f32::from_bits(read_word(self,  8));
+                                let x_min = f32::from_bits(read_word(self, 0));
+                                let x_max = f32::from_bits(read_word(self, 4));
+                                let y_min = f32::from_bits(read_word(self, 8));
                                 let y_max = f32::from_bits(read_word(self, 12));
                                 let z_min = f32::from_bits(read_word(self, 16));
                                 let z_max = f32::from_bits(read_word(self, 20));
 
-                                let left_child  = read_half(self, 24) as u16;
+                                let left_child = read_half(self, 24) as u16;
                                 let right_child = read_half(self, 26) as u16;
-                                let parent      = read_half(self, 28) as u16;
-                                let core_owner  = read_half(self, 30) as u16;
+                                let parent = read_half(self, 28) as u16;
+                                let core_owner = read_half(self, 30) as u16;
 
                                 let is_right = read_byte(self, 32) as u8;
                                 // pad bytes at 33, 34, 35 — skipped
 
-                                let queue_low_bit_addr  = read_word(self, 36);
+                                let queue_low_bit_addr = read_word(self, 36);
                                 let queue_high_bit_addr = read_half(self, 40) as u16;
-                                let prev_index          = read_half(self, 42) as u16;
-                                let node_id             = read_word(self, 44);
+                                let prev_index = read_half(self, 42) as u16;
+                                let node_id = read_word(self, 44);
 
                                 let is_leaf = left_child == 0 && right_child == 0;
 
-                                println!("AABB Node @ 0x{:04X} (ctx {})", base, self.context_in_progress);
+                                println!(
+                                    "AABB Node @ 0x{:04X} (ctx {})",
+                                    base, self.context_in_progress
+                                );
                                 println!("  x range = [{:>12.6}, {:>12.6}]", x_min, x_max);
                                 println!("  y range = [{:>12.6}, {:>12.6}]", y_min, y_max);
                                 println!("  z range = [{:>12.6}, {:>12.6}]", z_min, z_max);
-                                println!("  left_child  = 0x{:04X}{}", left_child,  if left_child  == 0 { " (none)" } else { "" });
-                                println!("  right_child = 0x{:04X}{}", right_child, if right_child == 0 { " (none)" } else { "" });
+                                println!(
+                                    "  left_child  = 0x{:04X}{}",
+                                    left_child,
+                                    if left_child == 0 { " (none)" } else { "" }
+                                );
+                                println!(
+                                    "  right_child = 0x{:04X}{}",
+                                    right_child,
+                                    if right_child == 0 { " (none)" } else { "" }
+                                );
                                 println!("  parent      = 0x{:04X}", parent);
-                                println!("  core_owner  = 0x{:04X}{}", core_owner, if core_owner == 0xFFFF { " (none)" } else { "" });
+                                println!(
+                                    "  core_owner  = 0x{:04X}{}",
+                                    core_owner,
+                                    if core_owner == 0xFFFF { " (none)" } else { "" }
+                                );
                                 println!("  is_right    = {}", is_right);
                                 println!("  is_leaf     = {}", is_leaf);
                                 println!("  queue_low_bit_addr  = 0x{:08X}", queue_low_bit_addr);
@@ -2586,26 +2688,34 @@ impl Core {
                                 println!("  node_id     = 0x{:08X} ({})", node_id, node_id);
 
                                 if self.pc[self.context_in_progress] == 0x051C {
-                                    let base = self.register_file[self.context_in_progress * REGS_PER_CONTEXT] as u16;
+                                    let base = self.register_file
+                                        [self.context_in_progress * REGS_PER_CONTEXT]
+                                        as u16;
 
-                                    let read_word = |s: &mut Self, off: u16| s.read_sram_word(&base.wrapping_add(off));
-                                    let read_half = |s: &mut Self, off: u16| s.read_sram_half_unsigned(&base.wrapping_add(off));
-                                    let read_byte = |s: &mut Self, off: u16| s.read_sram_byte_unsigned(&base.wrapping_add(off));
+                                    let read_word = |s: &mut Self, off: u16| {
+                                        s.read_sram_word(&base.wrapping_add(off))
+                                    };
+                                    let read_half = |s: &mut Self, off: u16| {
+                                        s.read_sram_half_unsigned(&base.wrapping_add(off))
+                                    };
+                                    let read_byte = |s: &mut Self, off: u16| {
+                                        s.read_sram_byte_unsigned(&base.wrapping_add(off))
+                                    };
 
-                                    let ox     = f32::from_bits(read_word(self,  0));
-                                    let oy     = f32::from_bits(read_word(self,  4));
-                                    let oz     = f32::from_bits(read_word(self,  8));
-                                    let dx     = f32::from_bits(read_word(self, 12));
-                                    let dy     = f32::from_bits(read_word(self, 16));
-                                    let dz     = f32::from_bits(read_word(self, 20));
+                                    let ox = f32::from_bits(read_word(self, 0));
+                                    let oy = f32::from_bits(read_word(self, 4));
+                                    let oz = f32::from_bits(read_word(self, 8));
+                                    let dx = f32::from_bits(read_word(self, 12));
+                                    let dy = f32::from_bits(read_word(self, 16));
+                                    let dz = f32::from_bits(read_word(self, 20));
                                     let inv_dx = f32::from_bits(read_word(self, 24));
                                     let inv_dy = f32::from_bits(read_word(self, 28));
                                     let inv_dz = f32::from_bits(read_word(self, 32));
-                                    let t_max  = f32::from_bits(read_word(self, 36));
+                                    let t_max = f32::from_bits(read_word(self, 36));
 
                                     let leaf_node_starting_point = read_word(self, 40);
-                                    let check_left               = read_word(self, 44);
-                                    let check_right              = read_word(self, 48);
+                                    let check_left = read_word(self, 44);
+                                    let check_right = read_word(self, 48);
 
                                     let pix_x = read_half(self, 52) as u16;
                                     let pix_y = read_half(self, 54) as u16;
@@ -2613,21 +2723,43 @@ impl Core {
                                     let tri_index = read_word(self, 56);
 
                                     let bounce_count = read_byte(self, 60) as u8;
-                                    let light_id     = read_byte(self, 61) as u8;
-                                    let ray_depth    = read_byte(self, 62) as u8;
-                                    let active_ray   = read_byte(self, 63) as u8;
+                                    let light_id = read_byte(self, 61) as u8;
+                                    let ray_depth = read_byte(self, 62) as u8;
+                                    let active_ray = read_byte(self, 63) as u8;
 
-                                    println!("Ray @ 0x{:04X} (ctx {})", base, self.context_in_progress);
-                                    println!("  origin    = ({:>12.6}, {:>12.6}, {:>12.6})", ox, oy, oz);
-                                    println!("  direction = ({:>12.6}, {:>12.6}, {:>12.6})", dx, dy, dz);
-                                    println!("  inv_dir   = ({:>12.6}, {:>12.6}, {:>12.6})", inv_dx, inv_dy, inv_dz);
+                                    println!(
+                                        "Ray @ 0x{:04X} (ctx {})",
+                                        base, self.context_in_progress
+                                    );
+                                    println!(
+                                        "  origin    = ({:>12.6}, {:>12.6}, {:>12.6})",
+                                        ox, oy, oz
+                                    );
+                                    println!(
+                                        "  direction = ({:>12.6}, {:>12.6}, {:>12.6})",
+                                        dx, dy, dz
+                                    );
+                                    println!(
+                                        "  inv_dir   = ({:>12.6}, {:>12.6}, {:>12.6})",
+                                        inv_dx, inv_dy, inv_dz
+                                    );
                                     println!("  t_max     = {}", t_max);
-                                    println!("  leaf_node_starting_point = 0x{:08X}", leaf_node_starting_point);
+                                    println!(
+                                        "  leaf_node_starting_point = 0x{:08X}",
+                                        leaf_node_starting_point
+                                    );
                                     println!("  check_left  = 0x{:08X}", check_left);
                                     println!("  check_right = 0x{:08X}", check_right);
                                     println!("  pixel       = ({}, {})", pix_x, pix_y);
-                                    println!("  tri_index   = 0x{:08X}{}", tri_index,
-                                            if tri_index == 0xFFFF_FFFF { " (no hit)" } else { "" });
+                                    println!(
+                                        "  tri_index   = 0x{:08X}{}",
+                                        tri_index,
+                                        if tri_index == 0xFFFF_FFFF {
+                                            " (no hit)"
+                                        } else {
+                                            ""
+                                        }
+                                    );
                                     println!("  bounce_count = {}", bounce_count);
                                     println!("  light_id     = {}", light_id);
                                     println!("  ray_depth    = {}", ray_depth);
@@ -2646,8 +2778,6 @@ impl Core {
                             self.pc[self.context_in_progress] += 4;
                             flush = instruction_to_execute.branch_hint;
                         }
-
-
                     }
                     Operation::BranchNe => {
                         if self.register_file[self.context_in_progress * REGS_PER_CONTEXT
@@ -2932,7 +3062,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 1;
-                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
                             let byte_offset = dram_address % 4;
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
@@ -2985,7 +3115,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 1;
-                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
                             let byte_offset = dram_address % 4;
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
@@ -3011,7 +3141,8 @@ impl Core {
                         assert!(
                             dram_address & 0x1 == 0,
                             "DRAM Half LOADS CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}",
-                            self.pc[self.context_in_progress], dram_address
+                            self.pc[self.context_in_progress],
+                            dram_address
                         );
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 2;
@@ -3041,7 +3172,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 2;
-                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
                             let byte_offset = dram_address & 0x2; //will be either 0 or 2
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
@@ -3068,7 +3199,8 @@ impl Core {
                         assert!(
                             dram_address & 0x1 == 0,
                             "DRAM Half LOADS CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}",
-                            self.pc[self.context_in_progress], dram_address
+                            self.pc[self.context_in_progress],
+                            dram_address
                         );
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 2;
@@ -3098,7 +3230,7 @@ impl Core {
                             let _ = self.dram_long_queue.push(internal_long_dram_op);
                         } else {
                             self.dram_bytes_read_close += 2;
-                            let value = dram[(dram_address % DRAM_STACK_SIZE)  / 4];
+                            let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
 
                             let byte_offset = dram_address & 0x2; //will be either 0 or 2
                             let load_dispatch = PipelineStage {
@@ -3126,11 +3258,14 @@ impl Core {
                         assert!(
                             dram_address & 0x3 == 0,
                             "DRAM Word LOADS CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}",
-                            self.pc[self.context_in_progress], dram_address
+                            self.pc[self.context_in_progress],
+                            dram_address
                         );
-                        if DEBUG && (core_in_list || cores_to_monitor.len() == 0)
-                    && (*context_to_monitor == self.context_in_progress as i32
-                        || *context_to_monitor < 0){
+                        if DEBUG
+                            && (core_in_list || cores_to_monitor.len() == 0)
+                            && (*context_to_monitor == self.context_in_progress as i32
+                                || *context_to_monitor < 0)
+                        {
                             println!("address: {}", dram_address);
                         }
                         // println!("DRAM ADDRESS FOR CORE {}: {:08X}", self.core_id, dram_address);
@@ -3193,7 +3328,9 @@ impl Core {
                         assert!(
                             dram_address & 0x3 == 0,
                             "DRAM Word STORES CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}, CORE {}",
-                            self.pc[self.context_in_progress], dram_address, self.core_id
+                            self.pc[self.context_in_progress],
+                            dram_address,
+                            self.core_id
                         );
                         let value_to_store = self.register_file[self.context_in_progress
                             * REGS_PER_CONTEXT
@@ -3218,7 +3355,7 @@ impl Core {
                             }
                         } else {
                             self.dram_bytes_wrote_close += 4;
-                            dram[dram_address / 4] = value_to_store;
+                            dram[(dram_address % DRAM_STACK_SIZE) / 4] = value_to_store;
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3235,7 +3372,9 @@ impl Core {
                         assert!(
                             dram_address & 0x1 == 0,
                             "DRAM Half STORES CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}, CORE {}",
-                            self.pc[self.context_in_progress], dram_address, self.core_id
+                            self.pc[self.context_in_progress],
+                            dram_address,
+                            self.core_id
                         );
                         let value_to_store = self.register_file[self.context_in_progress
                             * REGS_PER_CONTEXT
@@ -3261,12 +3400,12 @@ impl Core {
                             }
                         } else {
                             self.dram_bytes_wrote_close += 2;
-                            let old_value = dram[dram_address / 4];
+                            let old_value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
                             let byte_offset = dram_address & 0x2;
                             let mut value_to_store = (value_to_store as u32) << (byte_offset * 8);
                             value_to_store =
                                 (old_value & !(0xFFFF << (byte_offset * 8))) | value_to_store;
-                            dram[dram_address / 4] = value_to_store;
+                            dram[(dram_address % DRAM_STACK_SIZE) / 4] = value_to_store;
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3304,12 +3443,12 @@ impl Core {
                             }
                         } else {
                             self.dram_bytes_wrote_close += 1;
-                            let old_value = dram[dram_address / 4];
+                            let old_value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
                             let byte_offset = dram_address & 0x3;
                             let mut value_to_store = (value_to_store as u32) << (byte_offset * 8);
                             value_to_store =
                                 (old_value & !(0xFF << (byte_offset * 8))) | value_to_store;
-                            dram[dram_address / 4] = value_to_store;
+                            dram[(dram_address % DRAM_STACK_SIZE) / 4] = value_to_store;
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3318,8 +3457,7 @@ impl Core {
                         let dram_address =
                             self.register_file[self.context_in_progress * REGS_PER_CONTEXT
                                 + instruction_to_execute.sr1] as usize
-                                | (self.memory_bits[self.context_in_progress] as usize)
-                                    << 32;
+                                | (self.memory_bits[self.context_in_progress] as usize) << 32;
                         if DEBUG
                             && (core_in_list || cores_to_monitor.is_empty())
                             && (*context_to_monitor == self.context_in_progress as i32
@@ -3336,7 +3474,9 @@ impl Core {
                         assert!(
                             dram_address & 0x3 == 0,
                             "DRAM Word LOADS CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}, CORE {}",
-                            self.pc[self.context_in_progress], dram_address, self.core_id
+                            self.pc[self.context_in_progress],
+                            dram_address,
+                            self.core_id
                         );
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_wrote_far += 4;
@@ -3368,8 +3508,8 @@ impl Core {
                         } else {
                             self.dram_bytes_wrote_close += 4;
                             self.dram_bytes_read_close += 4;
-                            let old_value = dram[dram_address / 4];
-                            dram[dram_address / 4] = old_value + value_to_store;
+                            let old_value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
+                            dram[(dram_address % DRAM_STACK_SIZE) / 4] = old_value + value_to_store;
                             let load_dispatch = PipelineStage {
                                 cycle_to_read: self.cycle + DRAM_LATENCY_CLOSE,
                                 calculated_val: old_value,
@@ -3458,10 +3598,10 @@ impl Core {
                 }
                 self.context_in_progress = match next_ctx {
                     Some(idx) => idx,
-                    None => { if self.ctx_ownership == -1{
+                    None => {
+                        if self.ctx_ownership == -1 {
                             self.context_in_progress
-                        }
-                        else{
+                        } else {
                             self.ctx_ownership.try_into().expect("There was no owner")
                         }
                     }

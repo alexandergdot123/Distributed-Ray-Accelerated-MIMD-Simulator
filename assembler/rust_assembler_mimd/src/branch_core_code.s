@@ -573,7 +573,7 @@ IS_INTERNAL_NODE:
     lw r6, r1, 36                  # r6 = node->dram_queue 
     or r7, r7, 0xFFFF
     beq r6, r7, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
-
+    and r14, r14, 0
     # uint16_t ray_send_pending_addr = self.ray_send_pending_addr;
     add r8, r14, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
 
@@ -631,12 +631,12 @@ SEND_RAY_LOOP:
     srl r10, r10, 13
     and r11, r12, 0xF               # r11 = dest mailbox from ack msg low nibble
     or r10, r10, r11
-    add r13, r0, 0                  # r13 = ray base ptr
+    add r8, r0, 0                  # r13 = ray base ptr
     and r14, r14, 0                 # r14 = i = 0
 RAY_SEND_LOOP:
-    lw r9, r13, 0                   # r9 = ray word i
+    lw r9, r8, 0                   # r9 = ray word i
     sendflit r9, r10            # send word to core_owner on mailbox
-    add r13, r13, 4                 # r13 += 4 (next word)
+    add r8, r8, 4                 # r13 += 4 (next word)
     add r14, r14, 1                 # i++
     and r11, r11, 0
     add r11, r11, 16                # r11 = 16
@@ -663,17 +663,17 @@ ENSURE_SPACE_IN_QUEUE:
     and r10, r10, 0x3FFF            # r10 = tail & 0x3FFF (ring mask)
     add r11, r9, 16224                # r11 = queue base + 536 (start of ray slots)
     add r11, r11, r10               # r11 = write_addr = slot base + tail offset
-
+    and r7, r7, 0
 WAIT_FOR_SLOT_TO_OPEN:
     lbu_d r10, r11, 63              # r10 = slot[63] (valid byte)
     bne r10, r7, WAIT_FOR_SLOT_TO_OPEN, true   # spin while slot occupied (r7=0)
 
-    add r13, r0, 0                  # r13 = ray base ptr
+    add r9, r0, 0                  # r13 = ray base ptr
     and r14, r14, 0                 # r14 = i = 0
 RAY_DRAM_WRITE_LOOP:
-    lw r10, r13, 0                  # r10 = ray word i
+    lw r10, r9, 0                  # r10 = ray word i
     sw_d r10, r11, 0                # write to DRAM slot
-    add r13, r13, 4                 # r13 += 4
+    add r9, r9, 4                 # r13 += 4
     add r11, r11, 4                 # r11 write_addr += 4
     add r14, r14, 1                 # i++
     and r12, r12, 0
@@ -686,11 +686,8 @@ RAY_DRAM_WRITE_LOOP:
 ENSURE_NO_WRITERS:
     atomadd_d r10, r9, 1            # r10 = old lock value, increment
     and r11, r11, 0                 # r11 = 0
-    beq r11, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
+    blte r11, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
     atomadd_d r11, r9, -1           # undo our increment
-ENSURE_NO_WRITERS_LOOP:
-    lw_d r10, r9, 0                 # r10 = current lock value
-    bgt r11, r10, ENSURE_NO_WRITERS_LOOP, true   # spin while lock < 0 (writer active)
     beq r15, r15, ENSURE_NO_WRITERS, true        # retry claim
 
 SKIP_UNDO_LOCK:
@@ -701,8 +698,8 @@ SKIP_UNDO_LOCK:
     getclk r11                      # r11 = clock
     srl r12, r15, 4                 # r12 = core_id
     xor r12, r12, r11               # r12 = core_id ^ clock = raw idx
-    lhu r13, r1, 38                 # r13 = node->prev_index
-    beq r12, r13, BUMP_IDX, true    # if idx == prev_idx, bump to avoid repeat
+    lhu r11, r1, 38                 # r13 = node->prev_index
+    beq r12, r11, BUMP_IDX, true    # if idx == prev_idx, bump to avoid repeat
     beq r15, r15, SKIP_BUMP, true
 BUMP_IDX:
     add r12, r12, 1                 # r12 = idx + 1
@@ -780,9 +777,10 @@ SKIP_EMERGENCY_ENQUEUE:
 CHECK_DATA_MAILBOX:
     and r10, r15, 0xF               # r10 = thread_id
     nonblock r12, r10               # r12 = nb_recv(thread_id) -- data mailbox
+    and r7, r7, 0
     beq r12, r7, CHECK_INTERRUPT_MAILBOX, true   # r7=0, nothing available
 
-    and r13, r0, 0                 # r13 = slot ptr (starts at 0 = invalid sentinel)
+    add r13, r0, 0                 # r13 = slot ptr (starts at 0 = invalid sentinel)
     and r14, r14, 0                 # r14 = i = 0
 DATA_RECV_LOOP:
     block r9, r10                   # r9 = ray_word from data mailbox
@@ -885,13 +883,12 @@ DONE_WITH_INTERRUPT:
     and r11, r11, 0
     add r11, r11, 0xFFFF            # r11 = sentinel value
     bne r13, r11, SEND_RAY_LOOP, true   # if slot not sentinel keep looping
-    beq r15, r15, DECREMENT_PENDING, true
-
 DECREMENT_PENDING:
     and r10, r15, 0xF               # r10 = thread_id
     and r11, r10, 1                 # r11 = thread_id & 1
     add r11, r11, 32                # r11 = interrupt mailbox index
     intdis r11                      # disable interrupts
+    and r14, r14, 0
     add r8, r14, RAY_SEND_PENDING_ADDR    # r8 = &ray_send_pending
     atomadd r9, r8, -1              # decrement pending count
     beq r15, r15, ray_done, true
@@ -1177,7 +1174,7 @@ EMERGENCY_SLOT_FLUSH_LOOP:
 CHECK_SPAWNED_RAY_POOL:
     jmp r2, IS_IDLE_BRANCH               # is_idle_branch()
     lw r2, SPAWNED_RAY_POOL_HIGH         # uint32_t spawned_ray_pool_high = self.spawned_ray_pool_high
-    setmembits r2                        # set_address_bits(spawned_ray_pool_high)
+    setmembits r15, r2                        # set_address_bits(spawned_ray_pool_high)
     lw r2, SPAWNED_RAY_POOL_LOW          # uint32_t spawned_ray_pool_low = self.spawned_ray_pool_low
     lw_d r3, r2, 8                       # uint32_t count = load_dram_word(spawned_ray_pool_low + 8)
     blte r3, r14, GRAB_FROM_TILE, true   # if (count <= 0) goto grab_from_tile

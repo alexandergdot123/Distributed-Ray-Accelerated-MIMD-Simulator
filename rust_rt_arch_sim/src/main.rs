@@ -1277,12 +1277,9 @@ fn main() {
     }
 
     for i in 0..node_id_vec.len() {
-        let (_x, _y, node_id, is_branch) = node_id_vec[i];
+        let (x, y, node_id, is_branch) = node_id_vec[i];
         let queue_index = &node_id_hash_map.get(&node_id).unwrap().0;
         let address = address_ray_queue_hash_map.get(queue_index).unwrap();
-        if node_id == 977160 {
-            println!("Putting address {} at {}", address, 12 * node_id as usize + 9 + node_array_start);
-        }
         stacks[1].dram_stack[12 * node_id as usize + 8 + node_array_start] = is_branch;
         stacks[1].dram_stack[12 * node_id as usize + 9 + node_array_start] = *address as u32;
         dram_store_half(
@@ -1297,6 +1294,7 @@ fn main() {
         );
         stacks[1].dram_stack[12 * node_id as usize + 11 + node_array_start] =
             node_id_hash_map.get(&node_id).unwrap().1;
+        println!("NODE ADDRESS: {}, NODE ARRAY INDEX: {}, NODE_ID: {}, IS_BRANCH: {}, CORE_X: {}, CORE_Y: {}", address, node_id, queue_index, is_branch != 0, x, y);
     }
 
     let start_of_random_table = 60_000_004 / 4;

@@ -50,6 +50,31 @@ INITIALIZE_CORE:
     lw_d r3, r1, 4                       # r3 = RAY_QUEUE_LOW
     sw r2, RAY_QUEUE_HIGH
     sw r3, RAY_QUEUE_LOW
+    setmembits r2
+    add r3, r3, 12
+    atomadd_d r4, r3, 1
+MY_TICKET_HAS_NOT_ARRIVED:
+    lw_d r5, r3, 4
+    bne r4, r5, MY_TICKET_HAS_NOT_ARRIVED, true
+    add r3, r3, 8
+    atomadd_d r5, r3, -8192
+    and r4, r4, 0
+    add r4, r4, -8192
+WAIT_FOR_WRITER_LOCK:
+    lw_d r5, r3, 0
+    bne r5, r4, WAIT_FOR_WRITER_LOCK, false
+    add r3, r3, 4
+    atomadd_d r4, r3, 1
+    sll r4, r4, 1
+    add r4, r3, r4
+    srl r6, r15, 4
+    sh_d r6, r4, 4
+    add r3, r3, -4
+    atomadd_d r15, r3, 8192
+    add r3, r3, -4
+    atomadd_d r15, r3, 1
+
+
     lw r4, IS_BRANCH_CORE
     and r0, r0, 0
     beq r4, r0, download_leaf_core_code, true
@@ -103,7 +128,7 @@ branch_addr_high:
 branch_addr_low:
     .data 424 
 num_instructions_leaf:
-    .data 2000   
+    .data 2350  
 leaf_addr_high:
     .data 0   
 leaf_addr_low:
