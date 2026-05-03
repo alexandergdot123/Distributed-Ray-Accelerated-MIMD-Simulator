@@ -459,6 +459,7 @@ RETURN_FROM_INSERT_DRAM_QUEUE:
 start_ray_traversal:
     # yield();
     yield r8                        # r8 = scratch for yield
+    and r14, r14, 0
 
     # if (ray->check_left & 1 != 0 && ray->check_right & 1 != 0)
     # {
@@ -573,6 +574,8 @@ IS_INTERNAL_NODE:
     lw r6, r1, 36                  # r6 = node->dram_queue 
     or r7, r7, 0xFFFF
     beq r6, r7, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
+    lw r14, RAY_QUEUE_LOW
+    beq r6, r14, TRAVERSE_OWN_CHILD, false
     and r14, r14, 0
     # uint16_t ray_send_pending_addr = self.ray_send_pending_addr;
     add r8, r14, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
@@ -710,7 +713,7 @@ SKIP_BUMP:
     sh r12, r1, 42                  # node->prev_index = idx
     sll r12, r12, 1                 # r12 = idx * 2 (uint16 slots)
     add r9, r9, r12                 # r9 = &core_slots[idx]
-    lw_d r10, r9, 28                # r10 = core_to_cache (core_slots at +28 from lock field)
+    lh_d r10, r9, 8                # r10 = core_to_cache (core_slots at +28 from lock field)
     sh r10, r1, 30                  # node->core_owner = core_to_cache
     beq r15, r15, SKIP_EMERGENCY_ENQUEUE, true
 
@@ -2617,11 +2620,11 @@ CHECK_RECURSE:
     # recurse if owner == 0xFFFF || owner == self->core_id
     or r14, r14, 0xFFFF
     beq r10, r14, DO_RECURSE, true
-    lw r10, RAY_QUEUE_LOW
-    beq r10, r13, SET_NODE_ID, true
+    lw r14, RAY_QUEUE_LOW
+    beq r10, r14, SET_NODE_ID, true
     beq r15, r15, dfs_loop, true             # foreign owner: stop here
 SET_NODE_ID:
-    lw r10, r12, 44                        # node_id
+    lw r10, r13, 44                        # node_id
     sw r10, ROOT_NODE_ID
 DO_RECURSE:
     # -- push right child first (so left is processed first) --
