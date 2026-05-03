@@ -570,7 +570,7 @@ IS_INTERNAL_NODE:
     sb r5, r0, 62
 
     # if (node->core_owner != 0xFFFF)
-    lw r6, r1, 36                  # r6 = node->core_owner (uint16 offset 32) TODO confirm offset
+    lw r6, r1, 36                  # r6 = node->dram_queue 
     or r7, r7, 0xFFFF
     beq r6, r7, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
 
@@ -579,7 +579,10 @@ IS_INTERNAL_NODE:
 
     # atomic_add(ray_send_pending_addr, 1)
     atomadd r9, r8, 1               # r9 = clobber
-
+    lw r12, r1, 44                  # r12 = node->node_id TODO confirm offset
+    or r13, r13, 0xFFFF
+    lh r6, r1, 30                  # r6 = node->core_owner
+    beq r6, r13, REJECT_PATH, false
     # uint32_t is_thread_odd = self.thread_id & 1;
     # is_thread_odd += 32;
     # disable_interrupts(is_thread_odd)
@@ -591,13 +594,13 @@ IS_INTERNAL_NODE:
     intdis r11          
 
     # uint32_t request_word = (node->node_id << 17) | self.thread_id;
-    lw r12, r1, 44                  # r12 = node->node_id TODO confirm offset
+
     sll r12, r12, 17
     and r10, r15, 0xF               # r10 = thread_id
     or r12, r12, r10                # r12 = request_word
 
     # send_packet(request_word, node->core_owner, 32);
-    lhu r6, r1, 30                  # r6 = node->core_owner
+
     sendflit r6, r12, 32            # TODO confirm notation w/ Alex
 
 # uint32_t sent = 0;
