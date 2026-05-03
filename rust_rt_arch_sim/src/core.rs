@@ -2961,13 +2961,13 @@ impl Core {
                         self.pc[self.context_in_progress] += 4;
                     }
                     Operation::Yield => {
+                        switch_ctx = true;
                         if self.ctx_ownership >= 0 {
                             self.runnable[self.context_in_progress] = false;
                             assert!(
                                 self.ctx_ownership as usize != self.context_in_progress,
                                 "Dumb programmer"
                             );
-                            switch_ctx = true;
                         } else {
                             let mut interrupt_pending = false;
                             let mut index = 0;
@@ -2988,7 +2988,6 @@ impl Core {
                                     SRAM_SIZE as u16 - NUM_NOC_PIPES as u16 * 4 + index as u16 * 4;
                             } else {
                                 self.pc[self.context_in_progress] += 4;
-                                switch_ctx = true;
                             }
                         }
                     }
