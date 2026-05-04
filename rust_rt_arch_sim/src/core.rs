@@ -1838,8 +1838,18 @@ impl Core {
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                                 as i32)
                                 .wrapping_add(sr2_val as i32)) as u32;
-
+                        if DEBUG
+                            && (core_in_list || cores_to_monitor.is_empty())
+                            && (*context_to_monitor == self.context_in_progress as i32
+                                || *context_to_monitor < 0)
+                        {
+                            if self.pc[self.context_in_progress] == 0x1D74 {
+                                println!("STACK NEW: {}", self.register_file[instruction_to_execute.dr
+                            + self.context_in_progress * REGS_PER_CONTEXT]);
+                            }
+                        }
                         self.pc[self.context_in_progress] += 4;
+
                     }
                     Operation::Sub => {
                         let sr2_val = if instruction_to_execute.is_imm {
@@ -2593,7 +2603,7 @@ impl Core {
                                 || *context_to_monitor < 0)
                         {
                             println!("Local Atomadd from {:0x} - Old Value: {}", address, old_val);
-                            if self.pc[self.context_in_progress] == 0x1D80 {
+                            if self.pc[self.context_in_progress] == 0x1D90 {
                                 println!("DFS ALLOC HERE");
                             }
                         }

@@ -1,5 +1,4 @@
-# Branch core root node indices (LEAF_OWNED_PCT=79%)
-# 173 branch cores total
+# Branch core roots (LEAF_OWNED_PCT=79%)
 2
 79
 88
