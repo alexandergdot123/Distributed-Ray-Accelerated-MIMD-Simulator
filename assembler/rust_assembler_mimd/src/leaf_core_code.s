@@ -1750,9 +1750,9 @@ NODE_IDS_MATCH:
     lbu r7, r0, 63                          # r7 = ray->active_ray (byte at ray+63)
     add r9, r0, 0                           # r9 = local_queue = ray base address
     bne r14, r7, RECEIVE_RAY_DATA, false   # if ray slot is empty (active_ray == 0) goto RECEIVE_RAY_DATA
-    lw r9, RAY_QUEUE_CNT                # r9 = sender ray queue base address
+    add r9, r14, RAY_QUEUE_CNT                # r9 = sender ray queue base address
     atomadd r7, r9, 1                       # r7 = old_count = atomic_add(&queue.count, 1)
-    add r12, r14, 32                        # r12 = 16 (max queue entries)
+    add r12, r14, 16                        # r12 = 16 (max queue entries)
     bgt r12, r7, SPACE_IN_QUEUE, true     # if old_count < 16 goto SPACE_IN_QUEUE
     atomadd r7, r9, -1                      # revert: atomic_add(&queue.count, -1)
     add r7, r14, 7                          # r7 = reject_ray = 7 (reject code)
@@ -1770,7 +1770,7 @@ SPACE_IN_QUEUE:
     atomadd r7, r9, 64                      # r7 = old_tail = atomic_add(&queue.tail_relative, 64)
     and r7, r7, 0x3FF                       # r7 = tail_relative & 0x3FF (wrap within queue)
     add r7, r9, r7                          # r7 = queue_base + tail_relative
-    add r7, r7, 8                           # r7 = slot_addr (skip head+tail fields to reach slots)
+    add r7, r7, 8                           # r7 = slot_addr (skip count+tail fields to reach slots)
 RECEIVE_RAY_DATA:
     add r9, r14, 5                          # r9 = ray_ack = 5 (ack code)
     sll r9, r9, 24                          # r9 = ray_ack << 24
@@ -2411,7 +2411,7 @@ RAY_QUEUE_TAIL:
 RAY_QUEUE_CNT: 
 .data 0
 RAY_QUEUE_ENTRIES: 
-.data(512) 0
+.data(1024) 0
 DFS_STACK: 
 .data(256) 0
 RAY_TRIANGLE_REG_SPILL: 

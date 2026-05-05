@@ -561,8 +561,8 @@ AABB_INTERSECT_RETURN:
     beq r11, r7, AABB_MISS, true
 
     # if (node->tri_count == 0) <- ASSUME RAY -> TRI_INDEX
-    # ; beq r6, r7, IS_INTERNAL_NODE, true
-    # ; beq r15, r15, IS_LEAF_NODE, true
+    ; beq r6, r7, IS_INTERNAL_NODE, true
+    ; beq r15, r15, IS_LEAF_NODE, true
 
 IS_INTERNAL_NODE:
     # ray->ray_depth++
@@ -939,6 +939,7 @@ TRAVERSE_OWN_CHILD:
 ;     beq r15, r15, start_ray_traversal, true
 
 AABB_MISS:
+    and r7, r7, 0                   # r7 = 0
     lbu r5, r0, 62                  # r5 = ray->ray_depth  (was 59)
     beq r5, r7, MISS_AT_ROOT, true
     lbu r6, r1, 32                  # r6 = node->is_right  (was 31)
@@ -1055,6 +1056,7 @@ SLOT_AVAILABLE_LOCAL_RAY_QUEUE:
     and r9, r9, 0
     sb r9, r12, 63                  # clear slot
     lw r1, r0, 40                   # node = ray->leaf_node_starting_point
+    lhu r1, r1, LEAF_CORE_LOOKUP_TABLE
     #ABOVE, WE ASSUME THE QUEUE HAS BEEN INSERTED WITH THE CORRECT SRAM ADDRESS TODO
     beq r15, r15, start_ray_traversal, true  
 
@@ -2777,7 +2779,7 @@ BRANCH_START_OF_GEO:
 BRANCH_SIZE_OF_GEO:      
 .data 32768
 BRANCH_IDLE_THRESHOLD:    
-.data 1000000
+.data 0x7FFFFFFF
 IDLE_WINDOW:             
 .data 100000
 EAT_RAY_MASK:            

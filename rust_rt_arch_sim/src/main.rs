@@ -1388,7 +1388,14 @@ fn main() {
     let branch_core_code_base = 400 / 4;
     for i in auto_gen_code::get_branch_core_code().iter().enumerate() {
         stacks[0].dram_stack[branch_core_code_base + i.0] = *i.1;
+
     }
+
+    // println!("Value at address 6728: {}, line {} in main.rs", dram_read_word(&stacks[0].dram_stack, 6728), line!());
+
+    // if dram_read_word(&stacks[0].dram_stack, 6728) != 0{
+    //     return;
+    // }
 
     /*
     typedef struct
@@ -1421,52 +1428,61 @@ fn main() {
 
     */
 
-    let idle_queue_base = 63_300_000 / 4;
+    // let idle_queue_base = 63_300_000 / 4;
     
-    for i in 0..8 {
-        stacks[i].dram_stack[idle_queue_base] = 0; // head_relative = 0
-        stacks[i].dram_stack[idle_queue_base + 1] = 0; // tail_relative = 0
-        stacks[i].dram_stack[idle_queue_base + 2] = 0; // count = 0
-        stacks[i].dram_stack[idle_queue_base + 3] = ((i >> 1) as u32) & 3 ; // parent_node_high
-        stacks[i].dram_stack[idle_queue_base + 4] = (63_400_000 + (((i as u32) & 1) << 31)) / 4; // parent_node_low
-        for j in 0..8192 {
-            stacks[i].dram_stack[idle_queue_base + 5 + j] = 0; // mark all slots invalid initially
-        }
-    }
+    // for i in 0..8 {
+    //     stacks[i].dram_stack[idle_queue_base] = 0; // head_relative = 0
+    //     stacks[i].dram_stack[idle_queue_base + 1] = 0; // tail_relative = 0
+    //     stacks[i].dram_stack[idle_queue_base + 2] = 0; // count = 0
+    //     stacks[i].dram_stack[idle_queue_base + 3] = ((i >> 1) as u32) & 3 ; // parent_node_high
+    //     stacks[i].dram_stack[idle_queue_base + 4] = (63_400_000 + (((i as u32) & 1) << 31)) / 4; // parent_node_low
+    //     for j in 0..8192 {
+    //         stacks[i].dram_stack[idle_queue_base + 5 + j] = 0; // mark all slots invalid initially
+    //     }
+    // }
 
-    let idle_tree_level_1 = 63_400_000 / 4;
-    for i in 0..4 {
-        stacks[i * 2].dram_stack[idle_tree_level_1] = ((i >> 1) as u32) & 3; // parent_high
-        stacks[i * 2].dram_stack[idle_tree_level_1 + 1] = (63_400_100 + ((((i >> 1) as u32) & 1) << 31)); // parent_low
-        stacks[i * 2].dram_stack[idle_tree_level_1 + 2] = (i as u32); // left_high
-        stacks[i * 2].dram_stack[idle_tree_level_1 + 3] = (63_300_000) / 4; // left_low
-        stacks[i * 2].dram_stack[idle_tree_level_1 + 4] = (i as u32); // right_high
-        stacks[i * 2].dram_stack[idle_tree_level_1 + 5] = (63_300_000 | (1 << 31)) / 4; // right_low
-        stacks[i * 2].dram_stack[idle_tree_level_1 + 6] = 0 | 0; // is_left = 0 for root
-    }
+    // println!("Value at address 6728: {}, line {} in main.rs", dram_read_word(&stacks[0].dram_stack, 6728), line!());
 
-    let idle_tree_level_2 = 63_400_100 / 4;
-    for i in 0..2 {
-        stacks[i * 4].dram_stack[idle_tree_level_2] = ((i >> 1) as u32) & 3; // parent_high
-        stacks[i * 4].dram_stack[idle_tree_level_2 + 1] = 63_400_200; // parent_low
-        stacks[i * 4].dram_stack[idle_tree_level_2 + 2] = (i as u32) * 2; // left_high
-        stacks[i * 4].dram_stack[idle_tree_level_2 + 3] = (63_400_000) / 4; // left_low
-        stacks[i * 4].dram_stack[idle_tree_level_2 + 4] = (i as u32) * 2 | 1; // right_high
-        stacks[i * 4].dram_stack[idle_tree_level_2 + 5] = (63_400_000 | (1 << 31)) / 4; // right_low
-        stacks[i * 4].dram_stack[idle_tree_level_2 + 6] = 0 | 1; // is_left = 0 for root
-    }
+    // if dram_read_word(&stacks[0].dram_stack, 6728) != 0{
+    //     return;
+    // }
 
-    let idle_tree_level_3 = 63_400_200 / 4;
-    for i in 0..1 {
-        stacks[i * 8].dram_stack[idle_tree_level_3] = 0; // parent_high
-        stacks[i * 8].dram_stack[idle_tree_level_3 + 1] = 0; // parent_low
-        stacks[i * 4].dram_stack[idle_tree_level_3 + 2] = 0; // left_high
-        stacks[i * 4].dram_stack[idle_tree_level_3 + 3] = (63_400_100) / 4; // left_low
-        stacks[i * 4].dram_stack[idle_tree_level_3 + 4] = 1; // right_high
-        stacks[i * 4].dram_stack[idle_tree_level_3 + 5] = (63_400_100) / 4; // right_low
-        stacks[i * 4].dram_stack[idle_tree_level_3 + 6] = 0 | 2; // is_left = 0 for root
-    }
+    // let idle_tree_level_1 = 63_400_000 / 4;
+    // for i in 0..4 {
+    //     stacks[i * 2].dram_stack[idle_tree_level_1] = ((i >> 1) as u32) & 3; // parent_high
+    //     stacks[i * 2].dram_stack[idle_tree_level_1 + 1] = (63_400_100 + ((((i >> 1) as u32) & 1) << 31)); // parent_low
+    //     stacks[i * 2].dram_stack[idle_tree_level_1 + 2] = (i as u32); // left_high
+    //     stacks[i * 2].dram_stack[idle_tree_level_1 + 3] = (63_300_000) / 4; // left_low
+    //     stacks[i * 2].dram_stack[idle_tree_level_1 + 4] = (i as u32); // right_high
+    //     stacks[i * 2].dram_stack[idle_tree_level_1 + 5] = (63_300_000 | (1 << 31)) / 4; // right_low
+    //     stacks[i * 2].dram_stack[idle_tree_level_1 + 6] = 0 | 0; // is_left = 0 for root
+    // }
+    
 
+    // let idle_tree_level_2 = 63_400_100 / 4;
+    // for i in 0..2 {
+    //     stacks[i * 4].dram_stack[idle_tree_level_2] = ((i >> 1) as u32) & 3; // parent_high
+    //     stacks[i * 4].dram_stack[idle_tree_level_2 + 1] = 63_400_200; // parent_low
+    //     stacks[i * 4].dram_stack[idle_tree_level_2 + 2] = (i as u32) * 2; // left_high
+    //     stacks[i * 4].dram_stack[idle_tree_level_2 + 3] = (63_400_000) / 4; // left_low
+    //     stacks[i * 4].dram_stack[idle_tree_level_2 + 4] = (i as u32) * 2 | 1; // right_high
+    //     stacks[i * 4].dram_stack[idle_tree_level_2 + 5] = (63_400_000 | (1 << 31)) / 4; // right_low
+    //     stacks[i * 4].dram_stack[idle_tree_level_2 + 6] = 0 | 1; // is_left = 0 for root
+    // }
+
+    // let idle_tree_level_3 = 63_400_200 / 4;
+    // for i in 0..1 {
+    //     stacks[i * 8].dram_stack[idle_tree_level_3] = 0; // parent_high
+    //     stacks[i * 8].dram_stack[idle_tree_level_3 + 1] = 0; // parent_low
+    //     stacks[i * 4].dram_stack[idle_tree_level_3 + 2] = 0; // left_high
+    //     stacks[i * 4].dram_stack[idle_tree_level_3 + 3] = (63_400_100) / 4; // left_low
+    //     stacks[i * 4].dram_stack[idle_tree_level_3 + 4] = 1; // right_high
+    //     stacks[i * 4].dram_stack[idle_tree_level_3 + 5] = (63_400_100) / 4; // right_low
+    //     stacks[i * 4].dram_stack[idle_tree_level_3 + 6] = 0 | 2; // is_left = 0 for root
+    // }
+
+
+    
     
 
     println!("Val: {}", dram_read_word(&stacks[1].dram_stack, 2151442532 - (1 << 31)));
@@ -1521,8 +1537,10 @@ fn main() {
                     }
                     local_read += core.get_local_read();
                     local_write += core.get_local_write();
-                    // if core.get_core_id() == 2944 {
-                    //     println!("HEAD: {}, TAIL: {}, CNT: {}, CORE: {}", stack.dram_stack[1163234496/4], stack.dram_stack[1163234496/4 + 1], stack.dram_stack[1163234496/4 + 2], 2944);  
+                    
+                    // if core.get_core_id() == 0 {
+                    //     println!("Value of dram at address 6728 is: {}", dram_read_word(&stack.dram_stack, 6728));
+                    //     // println!("HEAD: {}, TAIL: {}, CNT: {}, CORE: {}", stack.dram_stack[1163234496/4], stack.dram_stack[1163234496/4 + 1], stack.dram_stack[1163234496/4 + 2], 2944);  
                     // }
                 }
                 stack.local_read = local_read;
