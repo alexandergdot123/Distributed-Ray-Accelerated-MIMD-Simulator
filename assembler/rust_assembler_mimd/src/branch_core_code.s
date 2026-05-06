@@ -2234,8 +2234,7 @@ EAT_RAY_INTERRUPT: #working with r6-r14
     jmp r15, r4                             # return
 CONTINUE_WITH_EAT_RAY_INTERRUPT:
     block r7, r6                                # r7 = blocking_recv(channel) (full flit value)
-    lw r8, EAT_RAY_MASK                     # r8 = EAT_RAY_MASK (isolates core_id field)
-    and r8, r7, r8                          # r8 = core_id = flit & EAT_RAY_MASK
+    add r8, r7, 0
     srl r13, r7, 17                         # r13 = node_id = flit >> 17
     lw r9, ROOT_NODE_ID              # r9 = self.node_id (sender side)
     beq r13, r9, NODE_IDS_MATCH, true      # if node_id == sender_node_id goto NODE_IDS_MATCH
@@ -2275,7 +2274,8 @@ CHECK_IF_SPACE_IN_QUEUE:
     atomadd r7, r9, -1                      # revert: atomic_add(&queue.count, -1)
     add r7, r14, 7                          # r7 = reject_ray = 7 (reject code)
     sll r7, r7, 24                          # r7 = reject_ray << 24
-    and r9, r8, 0xF0                        # r9 = core_id high nibble
+    srl r9, r8, 4                       # r9 = core_id high nibble
+    sll r9, r9, 19
     sll r9, r9, 2                           # r9 = high nibble shifted to channel position
     and r8, r8, 0xF                         # r8 = core_id low nibble (thread_id)
     add r8, r8, 16                          # r8 = thread_id + 16 (send channel)
@@ -2293,8 +2293,9 @@ RECEIVE_RAY_DATA:
     add r9, r14, 5                          # r9 = ray_ack = 5 (ack code)
     sll r9, r9, 24                          # r9 = ray_ack << 24
     or r9, r9, r15                          # r9 = ray_ack << 24 | self (thread_id in low bits)
-    and r10, r8, 0xF0                       # r10 = core_id high nibble
-    sll r10, r10, 2                         # r10 = high nibble shifted to channel position
+    srl r10, r8, 4
+    sll r10, r10, 19
+    srl r10, r10, 13
     and r8, r8, 0xF                         # r8 = core_id low nibble (thread_id)
     add r8, r8, 16                          # r8 = thread_id + 16 (send channel)
     or r10, r10, r8                         # r10 = destination flit

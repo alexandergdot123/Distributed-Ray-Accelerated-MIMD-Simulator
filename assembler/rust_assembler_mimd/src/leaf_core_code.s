@@ -537,7 +537,7 @@ IS_INTERNAL_NODE:
     lw r6, r1, 44                  # r6 = node->node_id 
     or r9, r9, 0xFFFF
     beq r6, r9, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
-    lhu r6, r1, 34
+    lh r6, r1, 34
     beq r6, r9, REJECT_PATH, false
 
 
