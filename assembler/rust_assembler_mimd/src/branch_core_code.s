@@ -538,12 +538,12 @@ RIGHT_BITFIELD_DONE:
     sb r5, r0, 62
 
     # if (node->parent == 0) goto complete_ray;
-    lhu r6, r1, 28                  # r6 = node->parent
-    beq r6, r7, COMPLETE_RAY, true  # r7 = 0
+    lh r6, r1, 28                  # r6 = node->parent
+    or r12, r12, 0xFFFF
+    beq r6, r12, COMPLETE_RAY, true  # r7 = 0
 
     # node = node->parent;
-    and r1, r1, 0
-    add r1, r1, r6                  # r1 = node->parent (SRAM pointer)
+    add r1, r6, 0                  # r1 = node->parent (SRAM pointer)
     beq r15, r15, start_ray_traversal, true
 
 CHECK_BOTH_ZERO:
@@ -1940,6 +1940,7 @@ WAIT_FOR_SLOT_0_TO_OPEN:
     and r9, r9, r13                     # r9 = tail & mask
     add r13, r11, r9                    # r13 = slot_base for slot 1
 WAIT_FOR_SLOT_1_TO_OPEN:
+    switchctx
     lbu r11, r13, 31                    # r11 = load_dram_byte(slot_base + 31)
     bne r14, r11, WAIT_FOR_SLOT_1_TO_OPEN, false  # while (slot[31] != 0) spin
     # store shadow ray 1 (light 1)
@@ -2258,7 +2259,7 @@ NODE_IDS_MATCH:
     bne r14, r7, reject_ray_interrupt, false # if flushing_queue != 0 goto reject_ray_interrupt
     lbu r7, r0, 63                          # r7 = ray->active_ray (byte at ray+63)
     add r9, r0, 0                           # r9 = local_queue = ray base address
-    bne r14, r7, RECEIVE_RAY_DATA, false   # if ray slot is empty (active_ray == 0) goto RECEIVE_RAY_DATA
+    beq r14, r7, RECEIVE_RAY_DATA, false   # if ray slot is empty (active_ray == 0) goto RECEIVE_RAY_DATA
     lw r10, ROOT_NODE_ID             # r10 = sender node id
     beq r13, r10, SENDER_QUEUE_EAT_RAY_INTERRUPT, true  # if node_id == sender goto SENDER_QUEUE
     add r9, r14, LOCAL_RAY_QUEUE              # r9 = receiver ray queue base address
