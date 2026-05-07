@@ -1686,7 +1686,7 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     lw r10, EPSILON                 # float epsilon = self.epsilon
     fplt.32 r8, r10, r13                # r8 = epsilon < tmax
     and r11, r6, r8                     # r11 = (tmax >= tmin) && (tmax > epsilon)
-    blte r7, r11, AABB_INTERSECT_RETURN, false  # if (tmax < EPSILON) return false
+    beq r7, r11, AABB_INTERSECT_RETURN, false  # if (tmax < EPSILON) return false
     #doing y now
     lw r2, r1, 8
     lw r3, r0, 4
@@ -1703,7 +1703,7 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     fplt.32 r6, r12, r13                  # r6 = tmin < tmax
     fplt.32 r8, r10, r13                # r8 = epsilon < tmax
     and r11, r6, r8                     # r11 = (tmax >= tmin) && (tmax > epsilon)
-    blte r7, r11, AABB_INTERSECT_RETURN, false  # if (tmax < EPSILON) return false
+    beq r7, r11, AABB_INTERSECT_RETURN, false  # if (tmax < EPSILON) return false
     #doing z now
     lw r2, r1, 16                           # r2 = node->z_min
     lw r3, r0, 8                            # r3 = ray->oz
