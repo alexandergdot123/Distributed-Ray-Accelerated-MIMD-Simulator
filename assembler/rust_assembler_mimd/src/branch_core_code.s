@@ -326,6 +326,10 @@ CONTINUE_WITH_SWITCH_ROLES_INTERRUPT:
     bne r9, r14, UNHANDLED_CORE, false # if previously_idle == 0 goto SWITCH_ROLES_INTERRUPT_DONE
     #     send_flit(REJECT_CHANGE << 24, switch_core_request >> 4, switch_core_request & 0xF + 16);
 REJECT_CHANGE:
+    # place to remove lock 
+    lw r9, RAY_QUEUE_LOW
+    add r9, r9, 20
+    atomadd_d r10, r9, -1 
     add r10, r7, 0                      # r10 = switch_core_request
     add r11, r14, 14                    # r11 = REJECT_CHANGE = 14
     sll r11, r11, 24                     # r11 = REJECT_CHANGE << 24
@@ -363,6 +367,10 @@ LEGAL_TO_SWITCH:
     atomadd r15, r9, 1
     add r10, r14, 16 
 WAIT_FOR_FLUSH_READY:
+    # place to remove lock NEED TO MAKE SURE REGISTERS
+    lw r9, RAY_QUEUE_LOW
+    add r9, r9, 20
+    atomadd_d r10, r9, -1 
     lw r9, LOCAL_QUEUE_FLUSHING
     switchctx
     beq r10, r9, WAIT_FOR_FLUSH_READY, true
