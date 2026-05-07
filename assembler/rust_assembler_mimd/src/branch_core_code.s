@@ -2302,7 +2302,6 @@ RECEIVE_RAY_DATA:
     or r10, r10, r8                         # r10 = destination flit
     sendflit r9, r10                        # send_flit(ray_ack << 24 | self, dest) (signal ready to receive)
     and r8, r15, 0xF                        # r8 = self.thread_id (receive channel low bits)
-    add r8, r8, 16                          # r8 = self.thread_id + 16 (receive channel)
     block r9, r8                            # r9  = ray_data[0]  = blocking_recv(channel)
     block r10, r8                           # r10 = ray_data[1]
     block r11, r8                           # r11 = ray_data[2]

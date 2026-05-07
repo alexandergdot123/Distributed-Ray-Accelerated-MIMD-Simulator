@@ -299,6 +299,250 @@ impl<T> Eater<T> {
     }
 }
 
+
+
+
+
+
+pub const NOC_PRIORITY_THRESHOLD: u16 = 32;
+
+#[inline]
+fn flit_lane(mailbox_id: u16) -> usize {
+    if mailbox_id < NOC_PRIORITY_THRESHOLD { 0 } else { 1 }
+}
+
+// Two independent SPSC lanes. Lane 0 = high priority (mailbox < 32),
+// lane 1 = low priority (mailbox >= 32). Each lane has its own capacity;
+// flits never switch lanes between hops.
+struct PrioritizedInner {
+    lanes: [Inner<Flit>; 2],
+}
+
+// Each lane is itself an SPSC; the wrapper preserves SPSC discipline
+// because all pushes go through one Feeder and all pops through one Eater.
+unsafe impl Send for PrioritizedInner {}
+unsafe impl Sync for PrioritizedInner {}
+
+impl PrioritizedInner {
+    fn with_capacity_per_lane(capacity: usize) -> Self {
+        Self {
+            lanes: [
+                Inner::with_capacity(capacity),
+                Inner::with_capacity(capacity),
+            ],
+        }
+    }
+
+    #[inline]
+    fn push(&self, flit: Flit) -> Result<(), Flit> {
+        let lane = flit_lane(flit.mailbox_id);
+        self.lanes[lane].push(flit)
+    }
+
+    /// Strict priority: high lane wins.
+    #[inline]
+    fn pop(&self) -> Option<Flit> {
+        if let Some(f) = self.lanes[0].pop() {
+            return Some(f);
+        }
+        self.lanes[1].pop()
+    }
+
+    /// Strict priority: high lane wins.
+    #[inline]
+    fn peek_ptr(&self) -> Option<NonNull<Flit>> {
+        if let Some(p) = self.lanes[0].peek_ptr() {
+            return Some(p);
+        }
+        self.lanes[1].peek_ptr()
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.lanes[0].len() + self.lanes[1].len()
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.lanes[0].is_empty() && self.lanes[1].is_empty()
+    }
+
+    /// Conservative: returns true if EITHER lane is full. Use is_full_for
+    /// for accurate per-flit admission checks.
+    #[inline]
+    fn is_full_any(&self) -> bool {
+        self.lanes[0].is_full() || self.lanes[1].is_full()
+    }
+
+    #[inline]
+    fn is_full_for(&self, mailbox_id: u16) -> bool {
+        self.lanes[flit_lane(mailbox_id)].is_full()
+    }
+
+    #[inline]
+    fn capacity_per_lane(&self) -> usize {
+        self.lanes[0].capacity()
+    }
+}
+
+pub struct PrioritizedFlitQueue {
+    inner: PrioritizedInner,
+}
+
+impl PrioritizedFlitQueue {
+    pub fn new(capacity_per_lane: usize) -> Self {
+        Self {
+            inner: PrioritizedInner::with_capacity_per_lane(capacity_per_lane),
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, flit: Flit) -> Result<(), Flit> {
+        self.inner.push(flit)
+    }
+
+    #[inline]
+    pub fn pop(&mut self) -> Option<Flit> {
+        self.inner.pop()
+    }
+
+    #[inline]
+    pub fn peek<'a>(&'a mut self) -> Option<PeekGuard<'a, Flit>> {
+        let ptr = self.inner.peek_ptr()?;
+        Some(PeekGuard {
+            ptr,
+            _borrow: PhantomData,
+        })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns true if EITHER lane is full. For accurate admission checks
+    /// when you have a specific flit, use is_full_for.
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.inner.is_full_any()
+    }
+
+    #[inline]
+    pub fn is_full_for(&self, mailbox_id: u16) -> bool {
+        self.inner.is_full_for(mailbox_id)
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity_per_lane()
+    }
+
+    pub fn split(self) -> (PrioritizedFlitFeeder, PrioritizedFlitEater) {
+        let arc = Arc::new(self.inner);
+        (
+            PrioritizedFlitFeeder { q: arc.clone() },
+            PrioritizedFlitEater { q: arc },
+        )
+    }
+}
+
+pub struct PrioritizedFlitFeeder {
+    q: Arc<PrioritizedInner>,
+}
+
+pub struct PrioritizedFlitEater {
+    q: Arc<PrioritizedInner>,
+}
+
+impl PrioritizedFlitFeeder {
+    #[inline]
+    pub fn push(&mut self, flit: Flit) -> Result<(), Flit> {
+        self.q.push(flit)
+    }
+
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.q.is_full_any()
+    }
+
+    #[inline]
+    pub fn is_full_for(&self, mailbox_id: u16) -> bool {
+        self.q.is_full_for(mailbox_id)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.q.len()
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.q.capacity_per_lane()
+    }
+}
+
+impl PrioritizedFlitEater {
+    #[inline]
+    pub fn pop(&mut self) -> Option<Flit> {
+        self.q.pop()
+    }
+
+    #[inline]
+    pub fn peek<'a>(&'a mut self) -> Option<PeekGuard<'a, Flit>> {
+        let ptr = self.q.peek_ptr()?;
+        Some(PeekGuard {
+            ptr,
+            _borrow: PhantomData,
+        })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.q.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.q.is_empty()
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.q.capacity_per_lane()
+    }
+}
+
+
+
+
+pub struct BidirectionalNoc {
+    eater: PrioritizedFlitEater,
+    feeder: PrioritizedFlitFeeder,
+    latency: usize,
+}
+impl BidirectionalNoc {
+    pub fn new(
+        eater: PrioritizedFlitEater,
+        feeder: PrioritizedFlitFeeder,
+        latency: usize,
+    ) -> Self {
+        Self {
+            eater,
+            feeder,
+            latency,
+        }
+    }
+}
+
+
+
+
+
 struct PipelineStage {
     cycle_to_read: u64,
     calculated_val: u32,
@@ -315,20 +559,7 @@ pub struct Flit {
     origin_y: u16,
 }
 
-pub struct BidirectionalNoc {
-    eater: Eater<Flit>,
-    feeder: Feeder<Flit>,
-    latency: usize,
-}
-impl BidirectionalNoc {
-    pub fn new(eater: Eater<Flit>, feeder: Feeder<Flit>, latency: usize) -> Self {
-        Self {
-            eater,
-            feeder,
-            latency,
-        }
-    }
-}
+
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub enum Operation {
@@ -692,6 +923,28 @@ pub struct LongDramRequest {
     pub(crate) core_id: u32,
     pub(crate) origin_stack: usize,
 }
+
+
+
+
+
+
+
+/// Outcome of a routing attempt: did the flit move, and where did the contention happen?
+enum RouteOutcome {
+    Sent,              // flit was forwarded; caller should consider it consumed
+    Blocked(Direction), // outbound feeder full; caller may want to bump congestion
+    NoSuchNoc,         // the chosen outbound NOC doesn't exist (edge of mesh)
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Right,
+    Left,
+    Up,
+    Down,
+}
+
 pub struct Core {
     core_id: u32,
     top_bits_dram_stack: usize,
@@ -739,7 +992,7 @@ pub struct Core {
 
     pc: [u16; REGS_PER_CONTEXT],
 
-    output_noc_send: SpscQueue<Flit>,
+    output_noc_send: PrioritizedFlitQueue,
     noc_recv_fifo: Vec<SpscQueue<u32>>,
     interrupt_enable: Vec<Vec<bool>>,
 
@@ -817,7 +1070,7 @@ impl Core {
             fetched_value: None,
             decoded_instruction: None,
             cycle: 0,
-            output_noc_send: SpscQueue::<Flit>::new(OUTPUT_NOC_FIFO_CAPACITY),
+            output_noc_send: PrioritizedFlitQueue::new(OUTPUT_NOC_FIFO_CAPACITY),
             top_bits_dram_stack: dram_top_bits,
             dram_long_request: None,
             dram_long_response: None,
@@ -869,6 +1122,204 @@ impl Core {
                 .flit_received_manhattan_distance_traversed,
         }
     }
+
+#[inline]
+    fn route_direction(&self, dest_x: u16, dest_y: u16) -> Option<Direction> {
+        if dest_x == self.x_dim && dest_y == self.y_dim {
+            return None;
+        }
+        let go_x = if PRIORITIZE_X {
+            dest_x != self.x_dim
+        } else {
+            dest_y == self.y_dim
+        };
+        Some(if go_x {
+            if dest_x > self.x_dim { Direction::Right } else { Direction::Left }
+        } else {
+            if dest_y > self.y_dim { Direction::Down } else { Direction::Up }
+        })
+    }
+
+    #[inline]
+    fn has_noc(&self, dir: Direction) -> bool {
+        match dir {
+            Direction::Right => self.right_noc.is_some(),
+            Direction::Left  => self.left_noc.is_some(),
+            Direction::Up    => self.up_noc.is_some(),
+            Direction::Down  => self.down_noc.is_some(),
+        }
+    }
+
+    /// True if the outbound lane for this mailbox in `dir` is full.
+    /// Only call when has_noc(dir) is true.
+    #[inline]
+    fn lane_full(&self, dir: Direction, mailbox: u16) -> bool {
+        match dir {
+            Direction::Right => self.right_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
+            Direction::Left  => self.left_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
+            Direction::Up    => self.up_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
+            Direction::Down  => self.down_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
+        }
+    }
+
+    #[inline]
+    fn bump_util(&mut self, dir: Direction) {
+        let epoch = self.cycle as usize / NOC_UTIL_EPOCH_LEN;
+        let v = match dir {
+            Direction::Right => &mut self.right_noc_util,
+            Direction::Left  => &mut self.left_noc_util,
+            Direction::Up    => &mut self.up_noc_util,
+            Direction::Down  => &mut self.down_noc_util,
+        };
+        while v.len() <= epoch { v.push(0); }
+        v[epoch] += 1;
+    }
+
+    #[inline]
+    fn bump_congestion(&mut self, dir: Direction) {
+        let epoch = self.cycle as usize / NOC_UTIL_EPOCH_LEN;
+        let v = match dir {
+            Direction::Right => &mut self.right_noc_congestion,
+            Direction::Left  => &mut self.left_noc_congestion,
+            Direction::Up    => &mut self.up_noc_congestion,
+            Direction::Down  => &mut self.down_noc_congestion,
+        };
+        while v.len() <= epoch { v.push(0); }
+        v[epoch] += 1;
+    }
+
+    #[inline]
+    fn bump_mailbox_congestion(&mut self) {
+        let epoch = self.cycle as usize / NOC_UTIL_EPOCH_LEN;
+        while self.mailbox_congestion.len() <= epoch {
+            self.mailbox_congestion.push(0);
+        }
+        self.mailbox_congestion[epoch] += 1;
+    }
+
+    /// Push `flit` into the outbound NOC in direction `dir`. Caller must have
+    /// verified has_noc(dir) and !lane_full(dir, flit.mailbox_id).
+    #[inline]
+    fn forward_to(&mut self, dir: Direction, mut flit: Flit) {
+        let noc = match dir {
+            Direction::Right => self.right_noc.as_mut().unwrap(),
+            Direction::Left  => self.left_noc.as_mut().unwrap(),
+            Direction::Up    => self.up_noc.as_mut().unwrap(),
+            Direction::Down  => self.down_noc.as_mut().unwrap(),
+        };
+        flit.cycle_to_read = self.cycle + noc.latency as u64;
+        let _ = noc.feeder.push(flit);
+    }
+
+    #[inline]
+    fn pop_inbound(&mut self, from: Direction) -> Flit {
+        match from {
+            Direction::Right => self.right_noc.as_mut().unwrap().eater.pop().unwrap(),
+            Direction::Left  => self.left_noc.as_mut().unwrap().eater.pop().unwrap(),
+            Direction::Up    => self.up_noc.as_mut().unwrap().eater.pop().unwrap(),
+            Direction::Down  => self.down_noc.as_mut().unwrap().eater.pop().unwrap(),
+        }
+    }
+
+    // ========================================================================
+    // Per-cycle NOC tick
+    // ========================================================================
+
+    fn cycle_noc(&mut self) {
+        self.cycle_output_send();
+        self.cycle_inbound(Direction::Left);
+        self.cycle_inbound(Direction::Right);
+        self.cycle_inbound(Direction::Up);
+        self.cycle_inbound(Direction::Down);
+    }
+
+    /// Drain one flit (if any) from output_noc_send onto the appropriate outbound NOC.
+    fn cycle_output_send(&mut self) {
+        // Peek to learn destination + mailbox without committing to pop.
+        let (dest_x, dest_y, mailbox) = match self.output_noc_send.peek() {
+            Some(f) => (f.destination_x, f.destination_y, f.mailbox_id),
+            None => return,
+        };
+
+        let dir = match self.route_direction(dest_x, dest_y) {
+            Some(d) => d,
+            // A flit addressed to this core sitting in our own send queue is a bug.
+            None => panic!(
+                "core ({},{}) has flit in output_noc_send addressed to self (mailbox {})",
+                self.x_dim, self.y_dim, mailbox
+            ),
+        };
+
+        // No outbound port that direction → routing bug. Stay silent (no util/congestion).
+        if !self.has_noc(dir) {
+            return;
+        }
+
+        // Lane full → tried but couldn't.
+        if self.lane_full(dir, mailbox) {
+            self.bump_congestion(dir);
+            return;
+        }
+
+        // Commit: util goes up, flit moves.
+        self.bump_util(dir);
+        let flit = self.output_noc_send.pop().unwrap();
+        self.forward_to(dir, flit);
+    }
+
+    /// Drain one flit (if any has arrived) from the eater on direction `from`,
+    /// either delivering it locally or forwarding it onward.
+    fn cycle_inbound(&mut self, from: Direction) {
+        // Peek: capture fields and check arrival cycle, then release the borrow.
+        let (dest_x, dest_y, mailbox, ready) = {
+            let noc_opt = match from {
+                Direction::Right => self.right_noc.as_mut(),
+                Direction::Left  => self.left_noc.as_mut(),
+                Direction::Up    => self.up_noc.as_mut(),
+                Direction::Down  => self.down_noc.as_mut(),
+            };
+            let Some(noc) = noc_opt else { return; };
+            if noc.eater.is_empty() { return; }
+            let Some(f) = noc.eater.peek() else { return; };
+            (f.destination_x, f.destination_y, f.mailbox_id, f.cycle_to_read <= self.cycle)
+        };
+        if !ready {
+            return;
+        }
+
+        // Local delivery.
+        if dest_x == self.x_dim && dest_y == self.y_dim {
+            if self.noc_recv_fifo[mailbox as usize].is_full() {
+                self.bump_mailbox_congestion();
+                return;
+            }
+            let flit = self.pop_inbound(from);
+            let _ = self.noc_recv_fifo[flit.mailbox_id as usize].push(flit.value_to_send);
+            self.flits_received += 1;
+            self.flit_received_manhattan_distance_traversed +=
+                (flit.origin_x as i64 - flit.destination_x as i64).unsigned_abs() as usize
+                + (flit.origin_y as i64 - flit.destination_y as i64).unsigned_abs() as usize;
+            return;
+        }
+
+        // Forward.
+        let dir = self.route_direction(dest_x, dest_y).unwrap();
+        if !self.has_noc(dir) {
+            // Routing bug (e.g. flit headed off the edge). Silent — don't drop, don't pop.
+            return;
+        }
+        if self.lane_full(dir, mailbox) {
+            self.bump_congestion(dir);
+            return;
+        }
+        self.bump_util(dir);
+        let flit = self.pop_inbound(from);
+        self.forward_to(dir, flit);
+    }
+
+
+
+
     pub fn give_far_dram(&mut self, dram_vec: Vec<Sender<LongDramRequest>>) {
         self.dram_long_request = Some(dram_vec);
     }
@@ -1019,654 +1470,6 @@ impl Core {
             *self.sram.get(index3).expect(&format!("Failed to read SRAM word at PC 0x{:08X}, index out of bounds (byte 3): tried to access index {} when SRAM size is {}", self.pc[self.context_in_progress], index3, SRAM_SIZE)),
         ]);
         val
-    }
-    fn cycle_noc(&mut self) {
-        if self.output_noc_send.peek().is_some() {
-            let flit_to_send = self.output_noc_send.peek().unwrap();
-            let go_x = if PRIORITIZE_X {
-                flit_to_send.destination_x != self.x_dim
-            } else {
-                flit_to_send.destination_y == self.y_dim
-            };
-            if go_x {
-                if flit_to_send.destination_x > self.x_dim {
-                    while self.right_noc_util.len() <= self.cycle as usize / NOC_UTIL_EPOCH_LEN {
-                        self.right_noc_util.push(0);
-                    }
-                    self.right_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                    if let Some(right_noc) = &mut self.right_noc {
-                        if !right_noc.feeder.is_full() {
-                            let mut flit_to_transmit = self.output_noc_send.pop().unwrap();
-                            flit_to_transmit.cycle_to_read = self.cycle + right_noc.latency as u64;
-                            let _ = right_noc.feeder.push(flit_to_transmit);
-                        }
-                    } else {
-                        while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                            >= self.right_noc_congestion.len()
-                        {
-                            self.right_noc_congestion.push(0);
-                        }
-                        self.right_noc_congestion[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                    }
-                } else {
-                    if let Some(left_noc) = &mut self.left_noc {
-                        while self.left_noc_util.len() <= self.cycle as usize / NOC_UTIL_EPOCH_LEN {
-                            self.left_noc_util.push(0);
-                        }
-                        self.left_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                        if !left_noc.feeder.is_full() {
-                            let mut flit_to_transmit = self.output_noc_send.pop().unwrap();
-                            flit_to_transmit.cycle_to_read = self.cycle + left_noc.latency as u64;
-                            let _ = left_noc.feeder.push(flit_to_transmit);
-                        } else {
-                            while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                >= self.left_noc_congestion.len()
-                            {
-                                self.left_noc_congestion.push(0);
-                            }
-                            self.left_noc_congestion[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                        }
-                    }
-                }
-            } else {
-                if flit_to_send.destination_y > self.y_dim {
-                    if let Some(down_noc) = &mut self.down_noc {
-                        while self.down_noc_util.len() <= self.cycle as usize / NOC_UTIL_EPOCH_LEN {
-                            self.down_noc_util.push(0);
-                        }
-                        self.down_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                        if !down_noc.feeder.is_full() {
-                            let mut flit_to_transmit = self.output_noc_send.pop().unwrap();
-                            flit_to_transmit.cycle_to_read = self.cycle + down_noc.latency as u64;
-                            let _ = down_noc.feeder.push(flit_to_transmit);
-                        } else {
-                            while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                >= self.down_noc_congestion.len()
-                            {
-                                self.down_noc_congestion.push(0);
-                            }
-                            self.down_noc_congestion[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                        }
-                    }
-                } else {
-                    if let Some(up_noc) = &mut self.up_noc {
-                        while self.up_noc_util.len() <= self.cycle as usize / NOC_UTIL_EPOCH_LEN {
-                            self.up_noc_util.push(0);
-                        }
-                        self.up_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                        if !up_noc.feeder.is_full() {
-                            let mut flit_to_transmit = self.output_noc_send.pop().unwrap();
-                            flit_to_transmit.cycle_to_read = self.cycle + up_noc.latency as u64;
-                            let _ = up_noc.feeder.push(flit_to_transmit);
-                        } else {
-                            while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                >= self.up_noc_congestion.len()
-                            {
-                                self.up_noc_congestion.push(0);
-                            }
-                            self.up_noc_congestion[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(left_noc) = self.left_noc.as_mut() {
-            if !left_noc.eater.is_empty() {
-                if let Some(flit_received) = left_noc.eater.peek() {
-                    if flit_received.cycle_to_read <= self.cycle {
-                        let go_x = if PRIORITIZE_X {
-                            flit_received.destination_x != self.x_dim
-                        } else {
-                            flit_received.destination_y == self.y_dim
-                        };
-                        if flit_received.destination_x == self.x_dim
-                            && flit_received.destination_y == self.y_dim
-                        {
-                            if !self.noc_recv_fifo[flit_received.mailbox_id as usize].is_full() {
-                                let flit_to_process = left_noc.eater.pop().unwrap();
-                                let _ = self.noc_recv_fifo[flit_to_process.mailbox_id as usize]
-                                    .push(flit_to_process.value_to_send);
-                                self.flits_received += 1;
-                                self.flit_received_manhattan_distance_traversed +=
-                                    (flit_to_process.origin_x as i64
-                                        - flit_to_process.destination_x as i64)
-                                        .abs() as usize
-                                        + (flit_to_process.origin_y as i64
-                                            - flit_to_process.destination_y as i64)
-                                            .abs()
-                                            as usize;
-                                // println!("Core {} received flit at cycle {}", self.core_id, self.cycle);
-                            } else {
-                                while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    >= self.mailbox_congestion.len()
-                                {
-                                    self.mailbox_congestion.push(0);
-                                }
-                                self.mailbox_congestion
-                                    [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                            }
-                        } else if go_x {
-                            if flit_received.destination_x > self.x_dim {
-                                if let Some(right_noc) = &mut self.right_noc {
-                                    while self.right_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.right_noc_util.push(0);
-                                    }
-                                    self.right_noc_util
-                                        [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !right_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = left_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + right_noc.latency as u64;
-                                        let _ = right_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.right_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.right_noc_congestion.push(0);
-                                        }
-                                        self.right_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(left_noc) = &mut self.left_noc {
-                                    while self.left_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.left_noc_util.push(0);
-                                    }
-                                    self.left_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !left_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = left_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + left_noc.latency as u64;
-                                        let _ = left_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.left_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.left_noc_congestion.push(0);
-                                        }
-                                        self.left_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        } else {
-                            if flit_received.destination_y > self.y_dim {
-                                if let Some(down_noc) = &mut self.down_noc {
-                                    while self.down_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.down_noc_util.push(0);
-                                    }
-                                    self.down_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !down_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = left_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + down_noc.latency as u64;
-                                        let _ = down_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.down_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.down_noc_congestion.push(0);
-                                        }
-                                        self.down_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(up_noc) = &mut self.up_noc {
-                                    while self.up_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.up_noc_util.push(0);
-                                    }
-                                    self.up_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !up_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = left_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + up_noc.latency as u64;
-                                        let _ = up_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.up_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.up_noc_congestion.push(0);
-                                        }
-                                        self.up_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(right_noc) = self.right_noc.as_mut() {
-            if !right_noc.eater.is_empty() {
-                if let Some(flit_received) = right_noc.eater.peek() {
-                    if flit_received.cycle_to_read <= self.cycle {
-                        let go_x = if PRIORITIZE_X {
-                            flit_received.destination_x != self.x_dim
-                        } else {
-                            flit_received.destination_y == self.y_dim
-                        };
-                        if flit_received.destination_x == self.x_dim
-                            && flit_received.destination_y == self.y_dim
-                        {
-                            if !self.noc_recv_fifo[flit_received.mailbox_id as usize].is_full() {
-                                let flit_to_process = right_noc.eater.pop().unwrap();
-                                let _ = self.noc_recv_fifo[flit_to_process.mailbox_id as usize]
-                                    .push(flit_to_process.value_to_send);
-                                self.flits_received += 1;
-                                self.flit_received_manhattan_distance_traversed +=
-                                    (flit_to_process.origin_x as i64
-                                        - flit_to_process.destination_x as i64)
-                                        .abs() as usize
-                                        + (flit_to_process.origin_y as i64
-                                            - flit_to_process.destination_y as i64)
-                                            .abs()
-                                            as usize;
-                            } else {
-                                while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    >= self.mailbox_congestion.len()
-                                {
-                                    self.mailbox_congestion.push(0);
-                                }
-                                self.mailbox_congestion
-                                    [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                            }
-                        } else if go_x {
-                            if flit_received.destination_x > self.x_dim {
-                                if let Some(right_noc) = &mut self.right_noc {
-                                    while self.right_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.right_noc_util.push(0);
-                                    }
-                                    self.right_noc_util
-                                        [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !right_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = right_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + right_noc.latency as u64;
-                                        let _ = right_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.right_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.right_noc_congestion.push(0);
-                                        }
-                                        self.right_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(left_noc) = &mut self.left_noc {
-                                    while self.left_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.left_noc_util.push(0);
-                                    }
-                                    self.left_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !left_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = right_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + left_noc.latency as u64;
-                                        let _ = left_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.left_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.left_noc_congestion.push(0);
-                                        }
-                                        self.left_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        } else {
-                            if flit_received.destination_y > self.y_dim {
-                                if let Some(down_noc) = &mut self.down_noc {
-                                    while self.down_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.down_noc_util.push(0);
-                                    }
-                                    self.down_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !down_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = right_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + down_noc.latency as u64;
-                                        let _ = down_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.down_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.down_noc_congestion.push(0);
-                                        }
-                                        self.down_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(up_noc) = &mut self.up_noc {
-                                    while self.up_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.up_noc_util.push(0);
-                                    }
-                                    self.up_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !up_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = right_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + up_noc.latency as u64;
-                                        let _ = up_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.up_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.up_noc_congestion.push(0);
-                                        }
-                                        self.up_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(up_noc) = self.up_noc.as_mut() {
-            if !up_noc.eater.is_empty() {
-                if let Some(flit_received) = up_noc.eater.peek() {
-                    if flit_received.cycle_to_read <= self.cycle {
-                        let go_x = if PRIORITIZE_X {
-                            flit_received.destination_x != self.x_dim
-                        } else {
-                            flit_received.destination_y == self.y_dim
-                        };
-                        if flit_received.destination_x == self.x_dim
-                            && flit_received.destination_y == self.y_dim
-                        {
-                            if !self.noc_recv_fifo[flit_received.mailbox_id as usize].is_full() {
-                                let flit_to_process = up_noc.eater.pop().unwrap();
-                                let _ = self.noc_recv_fifo[flit_to_process.mailbox_id as usize]
-                                    .push(flit_to_process.value_to_send);
-                                self.flits_received += 1;
-                                self.flit_received_manhattan_distance_traversed +=
-                                    (flit_to_process.origin_x as i64
-                                        - flit_to_process.destination_x as i64)
-                                        .abs() as usize
-                                        + (flit_to_process.origin_y as i64
-                                            - flit_to_process.destination_y as i64)
-                                            .abs()
-                                            as usize;
-                            } else {
-                                while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    >= self.mailbox_congestion.len()
-                                {
-                                    self.mailbox_congestion.push(0);
-                                }
-                                self.mailbox_congestion
-                                    [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                            }
-                        } else if go_x {
-                            if flit_received.destination_x > self.x_dim {
-                                if let Some(right_noc) = &mut self.right_noc {
-                                    while self.right_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.right_noc_util.push(0);
-                                    }
-                                    self.right_noc_util
-                                        [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !right_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = up_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + right_noc.latency as u64;
-                                        let _ = right_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.right_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.right_noc_congestion.push(0);
-                                        }
-                                        self.right_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(left_noc) = &mut self.left_noc {
-                                    while self.left_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.left_noc_util.push(0);
-                                    }
-                                    self.left_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !left_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = up_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + left_noc.latency as u64;
-                                        let _ = left_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.left_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.left_noc_congestion.push(0);
-                                        }
-                                        self.left_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        } else {
-                            if flit_received.destination_y > self.y_dim {
-                                if let Some(down_noc) = &mut self.down_noc {
-                                    while self.down_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.down_noc_util.push(0);
-                                    }
-                                    self.down_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !down_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = up_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + down_noc.latency as u64;
-                                        let _ = down_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.down_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.down_noc_congestion.push(0);
-                                        }
-                                        self.down_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(up_noc) = &mut self.up_noc {
-                                    while self.up_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.up_noc_util.push(0);
-                                    }
-                                    self.up_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !up_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = up_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + up_noc.latency as u64;
-                                        let _ = up_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.up_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.up_noc_congestion.push(0);
-                                        }
-                                        self.up_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(down_noc) = self.down_noc.as_mut() {
-            if !down_noc.eater.is_empty() {
-                if let Some(flit_received) = down_noc.eater.peek() {
-                    if flit_received.cycle_to_read <= self.cycle {
-                        let go_x = if PRIORITIZE_X {
-                            flit_received.destination_x != self.x_dim
-                        } else {
-                            flit_received.destination_y == self.y_dim
-                        };
-                        if flit_received.destination_x == self.x_dim
-                            && flit_received.destination_y == self.y_dim
-                        {
-                            if !self.noc_recv_fifo[flit_received.mailbox_id as usize].is_full() {
-                                let flit_to_process = down_noc.eater.pop().unwrap();
-                                let _ = self.noc_recv_fifo[flit_to_process.mailbox_id as usize]
-                                    .push(flit_to_process.value_to_send);
-                                self.flits_received += 1;
-                                self.flit_received_manhattan_distance_traversed +=
-                                    (flit_to_process.origin_x as i64
-                                        - flit_to_process.destination_x as i64)
-                                        .abs() as usize
-                                        + (flit_to_process.origin_y as i64
-                                            - flit_to_process.destination_y as i64)
-                                            .abs()
-                                            as usize;
-                            } else {
-                                while self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    >= self.mailbox_congestion.len()
-                                {
-                                    self.mailbox_congestion.push(0);
-                                }
-                                self.mailbox_congestion
-                                    [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                            }
-                        } else if go_x {
-                            if flit_received.destination_x > self.x_dim {
-                                if let Some(right_noc) = &mut self.right_noc {
-                                    while self.right_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.right_noc_util.push(0);
-                                    }
-                                    self.right_noc_util
-                                        [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !right_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = down_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + right_noc.latency as u64;
-                                        let _ = right_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.right_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.right_noc_congestion.push(0);
-                                        }
-                                        self.right_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(left_noc) = &mut self.left_noc {
-                                    while self.left_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.left_noc_util.push(0);
-                                    }
-                                    self.left_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !left_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = down_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + left_noc.latency as u64;
-                                        let _ = left_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.left_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.left_noc_congestion.push(0);
-                                        }
-                                        self.left_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        } else {
-                            if flit_received.destination_y > self.y_dim {
-                                if let Some(down_noc) = &mut self.down_noc {
-                                    while self.down_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.down_noc_util.push(0);
-                                    }
-                                    self.down_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] +=
-                                        1;
-                                    if !down_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = down_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + down_noc.latency as u64;
-                                        let _ = down_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.down_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.down_noc_congestion.push(0);
-                                        }
-                                        self.down_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            } else {
-                                if let Some(up_noc) = &mut self.up_noc {
-                                    while self.up_noc_util.len()
-                                        <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                    {
-                                        self.up_noc_util.push(0);
-                                    }
-                                    self.up_noc_util[self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    if !up_noc.feeder.is_full() {
-                                        let mut flit_to_transmit = down_noc.eater.pop().unwrap();
-                                        flit_to_transmit.cycle_to_read =
-                                            self.cycle + up_noc.latency as u64;
-                                        let _ = up_noc.feeder.push(flit_to_transmit);
-                                    } else {
-                                        while self.up_noc_congestion.len()
-                                            <= self.cycle as usize / NOC_UTIL_EPOCH_LEN
-                                        {
-                                            self.up_noc_congestion.push(0);
-                                        }
-                                        self.up_noc_congestion
-                                            [self.cycle as usize / NOC_UTIL_EPOCH_LEN] += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     pub fn tick(
@@ -3663,7 +3466,7 @@ impl Core {
                                 + (outgoing_flit.origin_y as i64
                                     - outgoing_flit.destination_y as i64)
                                     .abs() as usize;
-                        if self.output_noc_send.is_full() {
+                        if self.output_noc_send.is_full_for(outgoing_flit.mailbox_id) {
                             switch_ctx = true;
                             println!("Core {} at context {} is trying to send a flit but the output buffer is full. Flit destination: ({}, {}), Mailbox: {}, Value: {}, Cycle: {}", self.core_id, self.context_in_progress, outgoing_flit.destination_x, outgoing_flit.destination_y, outgoing_flit.mailbox_id, outgoing_flit.value_to_send, self.cycle);
                         } else {

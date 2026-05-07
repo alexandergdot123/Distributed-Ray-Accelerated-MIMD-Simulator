@@ -1,7 +1,6 @@
 use crate::auto_gen_code::get_init_vector;
 use crate::core::{
-    BidirectionalNoc, CORES_IN_X, CORES_IN_Y, Core, DEBUG, DRAM_LATENCY_FAR, DRAM_STACK_SIZE,
-    Feeder, LongDramOp, LongDramRequest, NOC_FIFO_LATENCY, NOC_FIFO_SIZE, Operation, SpscQueue,
+    BidirectionalNoc, CORES_IN_X, CORES_IN_Y, Core, DEBUG, DRAM_LATENCY_FAR, DRAM_STACK_SIZE, Feeder, LongDramOp, LongDramRequest, NOC_FIFO_LATENCY, NOC_FIFO_SIZE, Operation, PrioritizedFlitQueue, SpscQueue
 };
 use crate::matrices::{MAT_A, MAT_B, MAT_C};
 use crate::parse_bvh::{QPoint, assemble_tree, read_indices, read_nodes, read_triangles, subtree_leaf_size};
@@ -102,8 +101,8 @@ fn assemble_stacks() -> Vec<Stack> {
                 x + 1,
                 y
             );
-            let rightwards = SpscQueue::new(NOC_FIFO_SIZE);
-            let leftwards = SpscQueue::new(NOC_FIFO_SIZE);
+            let rightwards = PrioritizedFlitQueue::new(NOC_FIFO_SIZE);
+            let leftwards = PrioritizedFlitQueue::new(NOC_FIFO_SIZE);
             let (rightwards_feeder, rightwards_eater) = rightwards.split();
             let (leftwards_feeder, leftwards_eater) = leftwards.split();
             let right_side =
@@ -124,8 +123,8 @@ fn assemble_stacks() -> Vec<Stack> {
                 x,
                 y + 1
             );
-            let upwards = SpscQueue::new(NOC_FIFO_SIZE);
-            let downwards = SpscQueue::new(NOC_FIFO_SIZE);
+            let upwards = PrioritizedFlitQueue::new(NOC_FIFO_SIZE);
+            let downwards = PrioritizedFlitQueue::new(NOC_FIFO_SIZE);
             let (upwards_feeder, upwards_eater) = upwards.split();
             let (downwards_feeder, downwards_eater) = downwards.split();
             let up_side = BidirectionalNoc::new(upwards_eater, downwards_feeder, NOC_FIFO_LATENCY);
