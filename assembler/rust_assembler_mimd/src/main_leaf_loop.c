@@ -7,41 +7,41 @@
 // always do pre-order traversal
 typedef struct
 { // 48 Bytes
-    float x_min;
-    float x_max;
-    float y_min;
-    float y_max;
-    float z_min;
-    float z_max;
-    uint16_t *left_child;         // 2 bytes - 0 if leaf
-    uint16_t *right_child;        // 2 bytes - 0 if leaf
-    uint16_t *parent;             // 2 bytes
-    uint8_t is_right;             // 1 byte
-    uint8_t tri_count;            // 1 byte
-    uint16_t tri_start;           // 2 bytes -
-    uint16_t core_owner;          // 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner)
-    uint32_t queue_low_bit_addr;  // 4 bytes - the address of the low bits of the ray queue for this node, used for sending rays to the owning core
-    uint16_t queue_high_bit_addr; // 2 bytes - the address of the high bits of the ray queue for this node, used for sending rays to the owning core
-    uint16_t prev_index;          // 2 bytes - select a different index each time for the core owner
-    uint32_t node_id;
+    float x_min; //0
+    float x_max; //4
+    float y_min; //8
+    float y_max; //12
+    float z_min; //16
+    float z_max; //20
+    uint16_t *left_child;         // 24; 2 bytes - 0 if leaf
+    uint16_t *right_child;        // 26; 2 bytes - 0 if leaf
+    uint16_t *parent;             // 28; 2 bytes
+    uint8_t is_right;             // 30; 1 byte
+    uint8_t tri_count;            // 31; 1 byte
+    uint16_t tri_start;           // 32; 2 bytes -
+    uint16_t core_owner;          // 34; 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner)
+    uint32_t queue_low_bit_addr;  // 36; 4 bytes - the address of the low bits of the ray queue for this node, used for sending rays to the owning core
+    uint16_t queue_high_bit_addr; // 40; 2 bytes - the address of the high bits of the ray queue for this node, used for sending rays to the owning core
+    uint16_t prev_index;          // 42; 2 bytes - select a different index each time for the core owner
+    uint32_t node_id;             // 44
 } AABB_Node;
 
 typedef struct
-{                                 // 64 Bytes, 16 packets
-    float ox, oy, oz;             // 12 bytes - origin
-    float dx, dy, dz;             // 12 bytes - direction
-    float inv_dx, inv_dy, inv_dz; // 12 bytes - precomputed 1/direction
-    float t_max;                  // 4 bytes  - valid interval
-    uint32_t leaf_node_starting_point;
-    uint32_t check_left;  // used for backtracking
-    uint32_t check_right; // used for backtracking
-    uint16_t pix_x;
-    uint16_t pix_y;
-    uint32_t tri_index; // index of the triangle hit, 0xFFFF_FFFF if no hit
-    uint8_t bounce_count;
-    uint8_t light_id; // 0 for not a shadow, 1, 2, 3 for lights
-    uint8_t ray_depth;
-    uint8_t active_ray;
+{                                         // 64 Bytes, 16 packets
+    float ox, oy, oz;  //0, 4, 8                    // 12 bytes - origin
+    float dx, dy, dz;  //12, 16, 20                 // 12 bytes - direction
+    float inv_dx, inv_dy, inv_dz; //24, 28, 32      // 12 bytes - precomputed 1/direction
+    float t_max; //36                               // 4 bytes  - valid interval
+    uint32_t leaf_node_starting_point; //40
+    uint32_t check_left;  //44                      // used for backtracking
+    uint32_t check_right; //48                      // used for backtracking
+    uint16_t pix_x; //52
+    uint16_t pix_y; //54
+    uint32_t tri_index; //56                        // index of the triangle hit, 0xFFFF_FFFF if no hit
+    uint8_t bounce_count; //60
+    uint8_t light_id; //61                          // 0 for not a shadow, 1, 2, 3 for lights
+    uint8_t ray_depth; //62
+    uint8_t active_ray; //63
 } Ray; // 64 Bytes, 16 packets
 
 typedef struct
@@ -175,7 +175,7 @@ yield();
 uint32_t left_bitfield_check = ray->check_left & (1 << ray->ray_depth) | node->left_child == 0;
 uint32_t right_bitfield_check = ray->check_right & (1 << ray->ray_depth) | node->right_child == 0;
 
-if (left_bitfield_check != 0 && right_bitfield_check != 0)
+if (left_bitfield_check == 1 && right_bitfield_check == 1)
 {
     // Both subtrees visited at this depth — backtrack
     uint32_t bitfield = *(ray.check_left + node->is_right * 4);
@@ -183,7 +183,7 @@ if (left_bitfield_check != 0 && right_bitfield_check != 0)
     bitfield |= or_value;
     *(ray.check_left + node->is_right * 4) = bitfield;
     ray->ray_depth--;
-    if (node->parent == 0)
+    if (node->parent == 0x0000FFFF)
     {
         goto send_ray_up;
     }

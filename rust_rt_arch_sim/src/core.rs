@@ -28,7 +28,7 @@ pub const DRAM_STACK_SIZE_LOG2: usize = 31;
 pub const NOC_FIFO_SIZE: usize = 1;
 pub const NOC_FIFO_LATENCY: usize = 1;
 pub const DEBUG: bool = true;
-pub const NOC_UTIL_EPOCH_LEN: usize = 250;
+pub const NOC_UTIL_EPOCH_LEN: usize = 200;
 pub const CTX_CNT: usize = 16;
 struct Inner<T> {
     buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,

@@ -25,9 +25,9 @@ SWITCH_DRAM_QUEUE:
     lw r11, CORE_ID_TO_SWITCH_TO
     sll r11, r11, 2
     add r12, r12, r11
-    lw_d r9, r12, 0
-    lw_d r10, r12, 4
-    lw r2, RAY_QUEUE_HIGH   # r2 = q_high #assume high in r2, low in
+    lw_d r9, r12, 0           # main queue high
+    lw_d r10, r12, 4          # main queue low
+        lw r2, RAY_QUEUE_HIGH   # r2 = q_high #assume high in r2, low in
     lw r3, RAY_QUEUE_LOW    # r3 = q_low
     sw r9, RAY_QUEUE_HIGH
     sw r10, RAY_QUEUE_LOW
@@ -38,7 +38,7 @@ SWITCH_DRAM_QUEUE:
 WAIT_FOR_FLUSH_READY_TWO:
     lw r9, LOCAL_QUEUE_FLUSHING
     switchctx
-    beq r10, r9, WAIT_FOR_FLUSH_READY_TWO, true
+    bne r10, r9, WAIT_FOR_FLUSH_READY_TWO, true #VALIDATED
     # ;     set_address_bits(q_high);
 
     setmembits r2
@@ -490,6 +490,7 @@ start_ray_traversal:
     and r4, r4, r2                  # r4 = ray->check_left & (1 << ray->ray_depth)
     lhu r6, r1, 24                  # r6 = node->left_child
     or r7, r7, 0xFFFF              # r7 = 0xFFFF (null sentinel)
+    srl r7, r7, 16                  #VALIDATED because unsigned half load
     beq r6, r7, LEFT_CHILD_NULL, true
     and r6, r6, 0                   # left_child != null => contribute 0
     beq r15, r15, LEFT_BITFIELD_DONE, true
@@ -524,10 +525,10 @@ RIGHT_BITFIELD_DONE:
 
     # TODO ASK ALEX ABOUT THIS
     # uint32_t bitfield = *(ray.check_left + node->is_right * 4);
-    lbu r6, r1, 32                  # r6 = node->is_right
+    lbu r6, r1, 30                  # r6 = node->is_right
     sll r6, r6, 2                   # r6 = node->is_right * 4
     add r6, r0, r6                  # r6 = &ray.check_left + is_right*4
-    lw r8, r6, 44                    # r8 = bitfield
+    lw r8, r6, 44 
 
 
     # uint32_t or_value = 1 << (ray->ray_depth - 1);
@@ -595,17 +596,17 @@ IS_INTERNAL_NODE:
     atomadd r9, r8, 1               # r9 = clobber
     lw r12, r1, 44                  # r12 = node->node_id TODO confirm offset
     or r13, r13, 0xFFFF
-    lh r6, r1, 30                  # r6 = node->core_owner
+    lh r6, r1, 34                  # r6 = node->core_owner
     beq r6, r13, REJECT_PATH, false
     # uint32_t is_thread_odd = self.thread_id & 1;
     # is_thread_odd += 32;
     # disable_interrupts(is_thread_odd)
     and r10, r15, 0xF               # r10 = thread_id
     and r11, r10, 1                 # r11 = is_thread_odd
-    add r11, r11, 32                
+    add r11, r11, 32                 
 
     # disable_interrupts(is_thread_odd);
-    intdis r11          
+    intdis r11         
 
     # uint32_t request_word = (node->node_id << 17) | self.thread_id;
 
@@ -640,7 +641,7 @@ SEND_RAY_LOOP:
     bne r9, r11, REJECT_PATH, true
 
     # ACK path: for (i = 0; i < 16; i++) send_packet(ray[i], core_owner, mailbox)
-    lhu r6, r1, 30                  # r6 = node->core_owner
+    lhu r6, r1, 34                  # r6 = node->core_owner
     srl r10, r12, 4
     sll r10, r10, 19
     srl r10, r10, 13
@@ -730,14 +731,14 @@ SKIP_BUMP:
     and r14, r14, 0
     lh_d r11, r9, 8                # r10 = core_to_cache (core_slots at +28 from lock field)
     beq r11, r12, NO_OWNER, true   #if picked self, fall back
-    sh r11, r1, 30                  # node->core_owner = core_to_cache
+    sh r11, r1, 34                  # node->core_owner = core_to_cache
     beq r15, r15, SKIP_EMERGENCY_ENQUEUE, true
 
 NO_OWNER:
     # node->core_owner = 0xFFFF
     and r11, r11, 0
     add r11, r11, 0xFFFF            # r11 = 0xFFFF
-    sh r11, r1, 30                  # node->core_owner = 0xFFFF
+    sh r11, r1, 34                  # node->core_owner = 0xFFFF
 
     # if (cur_ray_count > 200) -> emergency queue insertion
     # cur_ray_count still valid from ENSURE_SPACE_IN_QUEUE in r10? No — reload
@@ -811,11 +812,11 @@ DATA_RECV_LOOP:
     and r11, r11, 0
     add r11, r11, 16                # r11 = 16
     bgt r11, r14, DATA_RECV_LOOP, true   # loop while i < 16
-
+    and r14, r14, 0
     # *(slot - 16) = leaf_core_lookup_table->leaf_core_ptrs[leaf_node_index << 1]
     lw r9, r0, 40                   # r9 = ray->leaf_node_starting_point
     sll r9, r9, 1                   # r9 = leaf_node_index * 2 (uint16 array)
-    lw r11, LEAF_CORE_LOOKUP_TABLE  # r11 = base address of lookup table in SRAM
+    add r11, r14, LEAF_CORE_LOOKUP_TABLE  # r11 = base address of lookup table in SRAM
     add r11, r11, r9                # r11 = &leaf_core_ptrs[leaf_node_index]
     lhu r9, r11, 0                  # r9 = leaf_core_data_addr
     sw r9, r13, -16                 # *(slot - 16) = leaf_core_data_addr
@@ -918,46 +919,12 @@ TRAVERSE_OWN_CHILD:
     lhu r1, r1, 24                  # r1 = node->left_child
     beq r15, r15, start_ray_traversal, true
 
-; IS_LEAF_NODE:
-;     # bitfield = *(ray.check_left + node->is_right * 4)
-;     lbu r6, r1, 26                  # node->is_right
-;     sll r6, r6, 2
-;     add r6, r0, r6
-;     add r6, r6, 18
-;     lw r8, r6, 0
-
-;     lbu r5, r0, 62                  # ray->ray_depth
-;     add r5, r5, -1
-;     and r10, r10, 0
-;     add r10, r10, 1
-;     sll r10, r10, r5
-;     or r8, r8, r10
-;     sw r8, r6, 0
-
-;     # tri loop
-;     lhu r9, r1, 22                  # tri_start TODO confirm offset
-;     lbu r10, r1, 30                 # tri_count
-;     and r14, r14, 0
-; TRI_LOOP:
-;     beq r14, r10, TRI_LOOP_DONE, true
-;     # Triangle_Intersect(tri_index=r9, ray=r0) -- call convention TBD
-;     beq r15, r15, Triangle_Intersect, true
-; TRI_INTERSECT_RETURN:
-;     add r9, r9, 12
-;     add r14, r14, 1
-;     beq r15, r15, TRI_LOOP, true
-; TRI_LOOP_DONE:
-;     lbu r5, r0, 59
-;     add r5, r5, -1
-;     sb r5, r0, 59
-;     lhu r1, r1, 28                  # node = node->parent
-;     beq r15, r15, start_ray_traversal, true
 
 AABB_MISS:
     and r7, r7, 0                   # r7 = 0
     lbu r5, r0, 62                  # r5 = ray->ray_depth  (was 59)
     beq r5, r7, MISS_AT_ROOT, true
-    lbu r6, r1, 32                  # r6 = node->is_right  (was 31)
+    lbu r6, r1, 30                  # r6 = node->is_right  (was 31)
     sll r6, r6, 2                   # r6 *= 4 (0 or 4)
     add r6, r0, r6                  # r6 = ray + is_right*4
     lw r8, r6, 44                    # r8 = check_left or check_right
@@ -2196,7 +2163,7 @@ RECIPROCAL:
     xor r11, r11, 0xFFFF                # r11 = 0x7FFFFFFF
     and r11, r11, r9                    # r11 = |x|
     srl r13, r11, 23                    # r13 = exp (from |x|, NO sign pollution)
-    sub r13, r13, 253                   # r13 = 253 - exp = new_exp
+    sub r13, r13, 253                   # r13 = 254 - exp = new_exp
     srl r9, r11, 10                     # r9 = |x| >> 10 (from |x|, NO sign pollution)
     and r9, r9, 0x1FFC                  # 11-bit mantissa index, byte-aligned
     lw r14, DIV_TABLE_HIGH
@@ -2238,6 +2205,8 @@ INV_SQRT:
     setmembits r11                      # restore old membits (r11 holds saved value)
     jmp r15, r9                              # return (result in r8)    
 
+#UNCONDITIONAL JUMP
+
 EAT_RAY_INTERRUPT: #working with r6-r14
     add r4, r8, 0                           # r4 = return address (saved from r8 by caller convention)
     and r6, r15, 1                          # r6 = self.thread_id & 1 (is_odd_thread)
@@ -2269,6 +2238,9 @@ reject_ray_interrupt:
     sendflit r10, r11                       # send_flit(wrong_core << 24, dest) (reject: wrong node)
     intena r6                               # enable_interrupts(channel)
     jmp r15, r4                             # return
+
+#UNCONDITIONED BRANCH
+
 NODE_IDS_MATCH:
     lw r7, LOCAL_QUEUE_FLUSHING             # r7 = *(self.local_queue_flushing)
     bne r14, r7, reject_ray_interrupt, false # if flushing_queue != 0 goto reject_ray_interrupt
@@ -2400,18 +2372,21 @@ IDLE_CORE_INSERT_SPINLOCK:
     sh_d r5, r4, 0                          # store_dram_half(core_id, slot_addr + offsetof(core_id))
     add r5, r14, 1                          # r5 = 1
     sh_d r5, r4, 2                          # store_dram_half(1, slot_addr + offsetof(is_valid)) (mark ready)
+    setmembits r7
     jmp r15, r2                             # return
 
 SEARCH_FOR_IDLE_CORES: #There's no documentation of who uses this function
 #I am going to assume that r3 has a return address
     and r14, r14, 0                     # r14 = 0 (zero register)
     lw r5, IDLE_QUEUE_HIGH      # r5 = self.idle_queue_address_high
-    sw r5, SEARCH_FOR_IDLE_CORES_STORAGE # save idle_queue_address_high to scratch storage
+    setmembits r5, r4
+    sw r4, SEARCH_FOR_IDLE_CORES_STORAGE # save idle_queue_address_high to scratch storage
     add r5, r14, DFS_STACK              # r5 = &DFS_STACK (dfs stack pointer)
-    setmembits r5, r5                   # set_address_bits(DFS_STACK), r5 = old membits (discarded)
     lw r6, IDLE_QUEUE_LOW       # r6 = current = self.idle_queue_address_low
     or r8, r8, 0xFFFF                   # r8 = 0xFFFFFFFF (found_core_id sentinel = not found)
     atomadd_d r9, r6, -1                # r9 = old_count = atomic_add_dram(current.count, -1)
+    lw r4, SEARCH_FOR_IDLE_CORES_STORAGE;
+    setmembits r4
     add r4, r6, 0                       # r4 = current (base addr of leaf idle_core_queue_dram)
     bgt r9, r14, CLAIM_SLOT, false      # if old_count > 0 goto CLAIM_SLOT (fast path: slot available)
     atomadd_d r9, r6, 1                 # revert: atomic_add_dram(current.count, 1)
@@ -2590,7 +2565,7 @@ dfs_loop:
 
     # -- copy metadata --
     or r10, r10, 0xFFFF
-    sh r10, r13, 30                          # core_owner
+    sh r10, r13, 34                          # core_owner
     lhu_d r10, r12, 40
     sh r10, r13, 40                          # queue_high_bit_addr
     lw_d r10, r12, 36
@@ -2600,7 +2575,7 @@ dfs_loop:
 
     add r11, r14, 0xFFFF
     sh r11, r13, 42                          # prev_index = 0xFFFF
-    sb r8, r13, 32                           # is_right = is_right (byte field)
+    sb r8, r13, 30                           # is_right = is_right (byte field)
 
     # -- set parent pointer --
     sh r5, r13, 28                           # node->parent = parent_ptr
@@ -2632,7 +2607,7 @@ SKIP_PATCH:
     lw r10, r13, 36                         # owner = dram_node->core_owner
     bne r10, r11, CHECK_RECURSE, true
     lw r14, r13, 44                          # node_id
-    sw r14, ROOT_NODE_ID
+    sw r13, ROOT_NODE_ADDRESS
     and r14, r14, 0
 CHECK_RECURSE:
 
@@ -2682,11 +2657,11 @@ dfs_done:
     sw r10, 49028
     lw r10, JUMP_TO_SWITCH_ROLES_INTERRUPT
     sw r10, 49032
-    and r14, r14, 0
-    lw r10, ROOT_NODE_ID
-    add r11, r14, LEAF_CORE_LOOKUP_TABLE
-    add r11, r11, 256
-    sh r10, r11, 0
+    and r14, r14, 0                         # r14 = 0
+    lw r10, ROOT_NODE_ADDRESS               # r10 = ROOT_NODE_ADDRESS
+    add r11, r14, LEAF_CORE_LOOKUP_TABLE    # r11 = leaf_core_lookup_table + 0
+    add r11, r11, 256                       # r11 = leaf_core_lookup_table + 256
+    sh r10, r11, 0                          # leaf_core_lookup_table + 256 = ROOT_NODE_ADDRESS
     
     add r1, r14, LOCAL_RAY_QUEUE
     sw r14, r1, 0
@@ -2784,13 +2759,13 @@ LEAF_SIZE_OF_GEO:
 LEAF_START_OF_GEO:
 .data 16128
 leaf_start_of_code:
-.data 28
+.data 44
 SRAM_NODE_ALLOC_PTR:     
 .data 16128
 BRANCH_START_OF_CODE:    
-.data 28
+.data 44
 BRANCH_NUM_INSTRUCTION_BYTES: 
-.data 9000
+.data 9000 #17284
 BRANCH_START_OF_GEO:     
 .data 16128
 BRANCH_SIZE_OF_GEO:      

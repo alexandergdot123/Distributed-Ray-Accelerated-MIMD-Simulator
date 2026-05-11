@@ -10,9 +10,9 @@ typedef struct
     uint16_t *left_child;         // 2 bytes - 0 if leaf (24)
     uint16_t *right_child;        // 2 bytes - 0 if leaf (26)
     uint16_t *parent;             // 2 bytes (28)
-    uint16_t core_owner;          // 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner) (30)
-    uint8_t is_right;             // 1 byte (32)
-    uint8_t pad[3];               // (33)
+    uint8_t is_right;             // 1 byte (30)
+    uint8_t pad[3];               // (31)
+    uint16_t core_owner;          // (34) 2 bytes - the core that is currently responsible for this node (0xFFFF if no owner)
     uint32_t queue_low_bit_addr;  // (36) 4 bytes - the address of the low bits of the ray queue for this node, used for sending rays to the owning core
     uint16_t queue_high_bit_addr; // (40) 2 bytes - the address of the high bits of the ray queue for this node, used for sending rays to the owning core
     uint16_t prev_index;          // (42) 2 bytes - select a different index each time for the core owner

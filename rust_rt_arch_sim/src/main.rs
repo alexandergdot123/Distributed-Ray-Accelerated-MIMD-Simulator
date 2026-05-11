@@ -1566,15 +1566,18 @@ fn main() {
                 //     std::process::exit(1);
                 // }
                 if stack_num == 0 {
-                    if dram_read_word(&stack.dram_stack, 168_000_004) == 2560 * 1440 * 16 {
-                        println!("WE RENDERED THE SCENE!!!");
-                        println!(
-                            "Local Read: {}, Local write: {}, foreign read: {}, foreign write: {}",
-                            stack.local_read,
-                            stack.local_write,
-                            stack.foreign_read,
-                            stack.foreign_write
-                        );
+                    // if dram_read_word(&stack.dram_stack, 168_000_004) == 2560 * 1440 * 16 {
+                    //     println!("WE RENDERED THE SCENE!!!");
+                    //     println!(
+                    //         "Local Read: {}, Local write: {}, foreign read: {}, foreign write: {}",
+                    //         stack.local_read,
+                    //         stack.local_write,
+                    //         stack.foreign_read,
+                    //         stack.foreign_write
+                    //     );
+                    //     done_per_thread.store(true, Ordering::Release);
+                    // }
+                    if cycle == 200000 {
                         done_per_thread.store(true, Ordering::Release);
                     }
                     if dram_read_word(&stack.dram_stack, 168_000_000) != rays_completed_so_far {

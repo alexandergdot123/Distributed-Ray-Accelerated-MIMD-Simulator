@@ -34,7 +34,7 @@ SWITCH_DRAM_QUEUE:
 WAIT_FOR_FLUSH_READY_SWITCH_DRAM_QUEUE:
     lw r9, LOCAL_QUEUE_FLUSHING
     switchctx
-    beq r10, r9, WAIT_FOR_FLUSH_READY_SWITCH_DRAM_QUEUE, true
+    bne r10, r9, WAIT_FOR_FLUSH_READY_SWITCH_DRAM_QUEUE, true #beq to bne (VALIDATED)
     # ;     set_address_bits(q_high);
 
     setmembits r2
@@ -445,117 +445,150 @@ RETURN_FROM_INSERT_DRAM_QUEUE:
     beq r15, r15, 4321, true
 
 
+#RYAN VALIDATION START
 
+#LEAF CORE MAIN LOOP START
 
 START_RAY_TRAVERSAL:
     lw r1, ROOT_NODE_ADDRESS         # r1 = node
 START_SEARCHING:
-    yield r8                    # clobber r8
+    yield r8                         # clobber r8
+    #LEFT CHILD CHECK
     # uint32_t left_bitfield_check = ray->check_left & (1 << ray->ray_depth) | node->left_child == 0;
     lbu r5, r0, 62                  # r5 = ray->ray_depth
-    and r4, r4, 0
+    and r4, r4, 0                   # r4 = 0
     add r4, r4, 1                   # r4 = 1
     sll r4, r4, r5                  # r4 = 1 << ray->ray_depth
     lw r2, r0, 44                  # r2 = ray->check_left 
     and r4, r4, r2                  # r4 = ray->check_left & (1 << ray->ray_depth)
     lhu r6, r1, 24                  # r6 = node->left_child
-    and r7, r7, 0
-    add r7, r7, 0xFFFF              # r7 = 0xFFFF (null sentinel)
-    beq r6, r7, LEFT_CHILD_NULL, true
-    and r6, r6, 0                   # left_child != null => contribute 0
-    beq r15, r15, LEFT_BITFIELD_DONE, true
-LEFT_CHILD_NULL:
-    and r6, r6, 0
-    add r6, r6, 1                   # left_child == null => contribute 1 (forces visited)
-LEFT_BITFIELD_DONE:
-    or r4, r4, r6                   # r4 = left_bitfield_check
+    and r7, r7, 0                   # r7 = 0
+    add r7, r7, 0xFFFF              # r7 = 0xFFFFFFFF (null sentinel), sign extended by ISA
+    srl r7, r7, 16                  # r7 = 0x0000FFFF
+    beq r6, r7, LEFT_CHILD_NULL, true  # if (node->left_child == 0x0000FFFF) then LEFT_CHILD_NULL
 
-    # uint32_t right_bitfield_check = ray->check_right & (1 << ray->ray_depth) | node->right_child == 0;
-    lbu r5, r0, 62                  # r5 = ray->ray_depth
-    and r9, r9, 0
-    add r9, r9, 1
+    # if (node->left_child != 0x0000FFFF):
+    and r6, r6, 0                   #r6 = 0  WAS  r6 = node->left_child  # left_child != null => contribute 0
+    beq r15, r15, LEFT_BITFIELD_DONE, true
+
+#UNCONDITIONAL BRANCH
+
+# if (node->left_child == 0x0000FFFF)
+LEFT_CHILD_NULL:
+    and r6, r6, 0                   #r6 = 0  WAS  r6 = node->left_child
+    add r6, r6, 1                   #r6 = 1        # left_child == null => contribute 1 (forces visited)
+LEFT_BITFIELD_DONE:                 #r6 is either 0 or 1
+    or r4, r4, r6                   # r4 = left_bitfield_check; (0/1 | ray->check_left & (1 << ray->ray_depth))
+
+    #NOW RIGHT CHILD CHECK
+    #lbu r5, r0, 62                  #Removed because redundant
+    and r9, r9, 0                   #r9 = 0
+    add r9, r9, 1                   #r9 = 1
     sll r9, r9, r5                  # r9 = 1 << ray->ray_depth
-    lw r3, r0, 48                   
+    lw r3, r0, 48                   #r3 = ray->check_right                
     and r9, r9, r3                  # r9 = ray->check_right & (1 << ray->ray_depth)
-    lhu r6, r1, 26                  # r6 = node->right_child (uint16 at offset 26)
-    beq r6, r7, RIGHT_CHILD_NULL, true
-    and r6, r6, 0
+    lhu r6, r1, 26                  # r6 = node->right_child
+    beq r6, r7, RIGHT_CHILD_NULL, true #if (node->right_child == 0x0000FFFF) then RIGHT_CHILD_NULL
+
+    # if (node->right_child == 0x0000FFFF)
+    and r6, r6, 0                   # r6 = 0 WAS node->right_child
     beq r15, r15, RIGHT_BITFIELD_DONE, true
+
+#UNCONDITIONAL BRANCH
+
 RIGHT_CHILD_NULL:
-    and r6, r6, 0
-    add r6, r6, 0x1                   # right_child == null => contribute 1 (forces visited)
+    and r6, r6, 0                   #r6 = 0 WAS node->right_child
+    add r6, r6, 0x1                 #r6 = 1;  right_child == null => contribute 1 (forces visited)
 RIGHT_BITFIELD_DONE:
-    or r9, r9, r6                   # r9 = right_bitfield_check    
+    or r9, r9, r6                   # r9 = right_bitfield_check; (0/1 | ray->check_right & (1 << ray->ray_depth))   
 
     # if (left_bitfield_check != 0 && right_bitfield_check != 0) { ... }
-    and r6, r4, r9                  # r6 = left_bitfield_check & right_bitfield_check (nonzero if both set)
+    and r6, r4, r9                  # r6 = left_bitfield_check & right_bitfield_check
     and r7, r7, 0                   # r7 = 0
-    beq r6, r7, CHECK_BOTH_ZERO, true   # if r6 == 0, neither both set - check other cases
+    beq r6, r7, CHECK_BOTH_ZERO, true   # if (left_bitfield_check & right_bitfield_check) == 0 -> check other cases
 
     # uint32_t bitfield = *(ray.check_left + node->is_right * 4);
-    lbu r7, r1, 30                  # r6 = node->is_right
-    sll r7, r7, 2                   # r6 = node->is_right * 4
-    add r6, r0, 44                  # r6 = ray.check_left
+    lbu r7, r1, 30                  # r7 = node->is_right           WAS 0
+    sll r7, r7, 2                   # r7 = node->is_right * 4
+    add r6, r0, 44                  # r6 = &ray.check_left           WAS left_bitfield_check & right_bitfield_check
     add r6, r7, r6                  # r6 = &ray.check_left + is_right*4
-    lw r8, r6, 0                    # r8 = bitfield
-
+    lw r8, r6, 0                    # r8 = bitfield = *(ray.check_left + node->is_right * 4)
 
     # uint32_t or_value = 1 << (ray->ray_depth - 1);
-    lbu r5, r0, 62                  # r5 = ray->ray_depth
+    #lbu r5, r0, 62  #removed bc redundant       # r5 = ray->ray_depth
     add r5, r5, -1                  # r5 = ray_depth - 1
-    and r10, r10, 0
-    add r10, r10, 1
-    sll r10, r10, r5                # r10 = or_value
+    and r10, r10, 0                 #r10 = 0
+    add r10, r10, 1                 #r10 = 1
+    sll r10, r10, r5                # r10 = or_value = 1 << (ray->ray_depth - 1)
 
     # bitfield |= or_value;
-    or r8, r8, r10
-    sw r8, r6, 0                    # *(ray.check_left + is_right*4) = bitfield
+    or r8, r8, r10                  # r8 = bitfield | or_value
+    sw r8, r6, 0                    # *(ray.check_left + is_right*4) = bitfield | or_value
 
-    and r7, r7, 0
+    and r7, r7, 0                   # r7 = 0            WAS node->is_right * 4;  WHY IS THIS HERE
+
     # ray->ray_depth--;
-    lbu r5, r0, 62
-    add r5, r5, -1
-    sb r5, r0, 62
+    #lbu r5, r0, 62      removed cuz redundant            # r5 = ray->ray_depth         WAS ray_depth - 1
+    # add r5, r5, -1    removed cuz redundant              # r5 = ray_depth - 1
+    sb r5, r0, 62                   # ray->ray_depth = ray->ray_depth - 1
 
-    # if (node->parent == 0) goto send_ray_up;
+    # if (node->parent == 0x0000FFFF) goto send_ray_up;
     lhu r6, r1, 28                  # r6 = node->parent
-    beq r6, r7, SEND_RAY_UP, true  # r7 = 0
+    and r8, r8, 0                   # r8 = 0                WAS bitfield | or_value
+    add r8, r8, 0xFFFF              # r8 = 0xFFFFFFFF
+    srl r8, r8, 16                    # r8 = 0x0000FFFF
+    beq r6, r8, SEND_RAY_UP, true  # if (node->parent == 0x0000FFFF) then SEND_RAY_UP
 
-    lhu r1, r1, 28  #node = node->parent;
-
+    lhu r1, r1, 28  #node = node->parent;           WAS node
     beq r15, r15, START_SEARCHING, true
-    
+
+#UNCONDITIONAL BRANCH
+
+# if (left_bitfield_check & right_bitfield_check) == 0
 CHECK_BOTH_ZERO:
     # else if (left_bitfield_check == 0 && right_bitfield_check == 0)
-    or r6, r4, r9                   # r6 = left | right
-    bne r6, r7, TRAVERSE_LEFT_OR_RIGHT, false       # both zero -> do AABB test
-
+    or r6, r4, r9                   # r6 = left_bitfield_check | right_bitfield_check
+    bne r6, r7, TRAVERSE_LEFT_OR_RIGHT, false    # if (left_bitfield_check | right_bitfield_check) != 0 then TRAVERSE_LEFT_OR_RIGHT
+                                                 # one subtree not yt visited, descend into it;
+    # if (left_bitfield_check | right_bitfield_check) == 0:
     jmp r8, AABB_INTERSECT 
-AABB_INTERSECT_RETURN:
+
+#UNCONDITIONAL BRANCH
+
+AABB_INTERSECT_RETURN: #r11 = 1 (hit), 0 (miss), r7 = 0
     # if (hit)
-    beq r11, r7, AABB_MISS, true
+    beq r11, r7, AABB_MISS, true        #if result == 0 (miss) then AABB_MISS
 
+    # if result == hit)
     # if (node->tri_count == 0) <- ASSUME RAY -> TRI_INDEX
-    lbu r6, r1, 31                 
-    bne r6, r7, IS_LEAF_NODE, true
+    lbu r6, r1, 31                      #r6 = node->tri_count   
+    bne r6, r7, IS_LEAF_NODE, true      # if (node->tri_count != 0) then IS_LEAF_NODE
 
+# if (node->tri_count == 0)
 IS_INTERNAL_NODE:
     # ray->ray_depth++
-    lbu r5, r0, 62
-    add r5, r5, 1
-    sb r5, r0, 62
+    lbu r5, r0, 62              #r5 = ray->ray_depth
+    add r5, r5, 1               #r5 = ray->ray_depth + 1
+    sb r5, r0, 62               # ray->ray_depth = ray->ray_depth + 1
+
+# RYAN VALIDATED TRHOUGH HERE
 
     # if (node->node_id != 0xFFFF)
-    lw r6, r1, 44                  # r6 = node->node_id 
-    or r9, r9, 0xFFFF
-    beq r6, r9, TRAVERSE_OWN_CHILD, true   # owner == 0xFFFF means we own it
-    lw r6, ROOT_NODE_ID
-    beq r6, r9, TRAVERSE_OWN_CHILD, true
-    lh r6, r1, 34
-    beq r6, r9, REJECT_PATH, false
+    lw r6, r1, 44                          # r6 = node->node_id 
+    or r9, r9, 0xFFFF                      # r9 = 0xFFFFFFFF
+    beq r6, r9, TRAVERSE_OWN_CHILD, true   # if node->node_id == 0xFFFFFFFF then TRAVERSE_OWN_CHILD
+    # owner == 0xFFFF means we own it
 
+    lw r7, ROOT_NODE_ID                    # r7 = root_node_id (value)
+    beq r6, r7, TRAVERSE_OWN_CHILD, true   # if node->node_id == root_node_id then TRAVERSE_OWN_CHILD
+    and r7, r7, 0                          # r7 = 0
 
-#TODO NEED TO ADDRESS WHEN CORE ID == 0xFFFF!!!  I THINK TAKEN CARE OF NOW BY 553-554
+    # if node->node_id != root_node_id AND if node->node_id != 0xFFFFFFFF
+    lhu r6, r1, 34                          # r6 = core_owner
+    srl r9, r9, 16                          # r9 = 0x0000FFFF
+    beq r6, r9, REJECT_PATH, false         # if core_owner == 0x0000FFFF then REJECT_PATH
+
+# if core_owner != 0x0000FFFF:
     # uint16_t ray_send_pending_addr = self.ray_send_pending_addr;
 SEND_RAY_UP:
     add r8, r7, RAY_SEND_PENDING_ADDR    # r8 = self.ray_send_pending_addr
@@ -642,14 +675,17 @@ send_ray_loop:
     and r3, r3, 0
     add r3, r3, 1                   # r3 = sent = 1
     beq r15, r15, CHECK_DATA_MAILBOX, true
+
+#UNCONDITIONAL BRANCH
+
 REJECT_PATH:
     # push ray to DRAM queue
     lhu r8, r1, 40                  # r8 = node->queue_high_bit_addr
     setmembits r8                   # set address bits to reach node's DRAM stack
     lw r9, r1, 36                   # r9 = node->queue_low_bit_addr
 
-ENSURE_SPACE_IN_QUEUE:
     add r9, r9, 8
+ENSURE_SPACE_IN_QUEUE:
     atomadd_d r10, r9, 1               # r10 = cur_ray_count (count field is -12 from here)
     add r11, r7, 255               # r11 = 255
     blte r10, r11, THERE_EXISTS_SPACE_IN_DRAM_RAY_QUEUE, true   # spin while count > 255
@@ -659,7 +695,7 @@ THERE_EXISTS_SPACE_IN_DRAM_RAY_QUEUE:
     add r9, r9, -4                 # r9 = queue base (tail field)
     atomadd_d r10, r9, 64           # r10 = old tail, advance tail by 64 bytes
     and r10, r10, 0x3FFF            # r10 = tail & 0x3FFF (ring mask)
-    add r9, r9, 16228                # r11 = queue base + 540 (start of ray slots)
+    add r9, r9, 16224                # r11 = queue base + 540 (start of ray slots)
     add r9, r9, r10               # r11 = write_addr = slot base + tail offset
 
 WAIT_FOR_SLOT_TO_OPEN:
@@ -794,6 +830,7 @@ SKIP_EMERGENCY_ENQUEUE:
     add r3, r3, 1                   # r3 = sent = 1
 CHECK_DATA_MAILBOX:
     and r10, r15, 0xF               # r10 = thread_id
+    #add r10, r10, 16
     nonblock r12, r10               # r12 = nb_recv(thread_id) -- data mailbox
     and r7, r7, 0
     beq r12, r7, CHECK_INTERRUPT_MAILBOX, true   # r7=0, nothing available.
@@ -852,6 +889,9 @@ SEND_REJECT_RAY_MSG:
     or r13, r13, r11
     sendflit r12, r13
     beq r15, r15, SKIP_INTERRUPT_MAILBOX, true
+
+#UNCONDITIONAL JUMP
+
 CORRECT_NODE_ID:
     lbu r10, r0, 63
     bne r10, r7, NO_ROOM_IN_RAY_SLOT, true
@@ -880,8 +920,10 @@ SEND_ACK_PACKET:
     and r11, r11, 0xF
     add r11, r11, 16
     or r13, r13, r11
-    #or r12, r12, r15
     sendflit r12, r13
+ 
+#UNCONDITIONAL JMP
+
 SKIP_INTERRUPT_MAILBOX:
     or r12, r12, 0xFFFF
     bne r12, r4, send_ray_loop, false
@@ -924,7 +966,15 @@ TRIANGLE_INTERSECT_RETURN:
 SHADOW_RAY_NOT_OCCLUDED:
     add r3, r3, -1
     bne r4, r3, TRIANGLE_INTERSECT_LOOP, true
-    lhu r1, r1, 28
+
+    and r7, r7, 0            # triangle_intersect clobbers r7; restore for SEND_RAY_UP
+    lhu r10, r1, 28          # r10 = parent
+    and r8, r8, 0
+    add r8, r8, 0xFFFF
+    srl r8, r8, 16           # r8 = 0x0000FFFF
+    beq r10, r8, SEND_RAY_UP, true   # at root: r1 still = leaf node, r7 = 0
+    
+    add r1, r10, 0          #was lhu r1, r1, 28
     beq r15, r15, START_SEARCHING, true
 
 AABB_MISS:
@@ -941,94 +991,87 @@ AABB_MISS:
     sw r11, r10, 44
     lhu r1, r1, 28  
     beq r15, r15, START_SEARCHING, true
-    
+
+#UNCONDITIONAL BRANCH
+
+#RYAN VALIDATED STARTS
+
+# if (left_bitfield_check | right_bitfield_check) != 0
 TRAVERSE_LEFT_OR_RIGHT:
-    or r10, r10, 0xFFFF
-    lbu r12, r0, 62
-    add r12, r12, 1
-    sll r10, r10, r12
-    xor r10, r10, 0xFFFF
-    lw r9, r0, 44
-    lw r13, r0, 48
-    and r9, r9, r10
-    and r13, r13, r10
-    sw r9, r0, 44
-    sw r13, r0, 48
-    and r12, r12, 0
-    beq r4, r12, SKIP_LEFT_BITFIELD_INCREMENT, false
-    add r12, r12, 2
+    or r10, r10, 0xFFFF             #r10 = 0xFFFFFFFF
+    lbu r12, r0, 62                 #r12 = ray->ray_depth
+    add r12, r12, 1                 #r12 = ray->ray_depth + 1
+    sll r10, r10, r12               #r10 = 0xFFFFFFFF << (ray_depth + 1)
+    xor r10, r10, 0xFFFF            #r10 = ~(0xFFFFFFFF << (ray_depth + 1))
+    lw r9, r0, 44                   #r9 = ray->check_left
+    lw r13, r0, 48                  #r13 = ray->check_right
+    and r9, r9, r10                 #r9 = ray->check_left &  ~(0xFFFFFFFF << (ray_depth + 1))
+    and r13, r13, r10               #r13 = ray->check_right & ~(0xFFFFFFFF << (ray_depth + 1))
+    sw r9, r0, 44                   #ray->check_left = ray->check_left &  ~(0xFFFFFFFF << (ray_depth + 1))
+    sw r13, r0, 48                  #ray->check_right = ray->check_right &  ~(0xFFFFFFFF << (ray_depth + 1))
+    and r12, r12, 0                 #r12 = 0
+    beq r4, r12, SKIP_LEFT_BITFIELD_INCREMENT, false #if left_bitfield_check == 0 then SKIP_LEFT_BITFIELD_INCREMENT
+
+    # if left_bitfield_check == 1
+    add r12, r12, 2                 #r12 = 2
 SKIP_LEFT_BITFIELD_INCREMENT:
-    add r1, r1, r12
-    lhu r1, r1, 24          # Go left or right
-    lbu r10, r0, 62
-    add r10, r10, 1
-    sb r10, r0, 62
+    add r1, r1, r12                 #r1 = &node (+ 2)
+    lhu r1, r1, 24                  #r1 = node = left_child OR right_child  # Go left or right
+    lbu r10, r0, 62                 #r10 = *(&ray + 62) = ray->ray_depth
+    add r10, r10, 1                 #ray_depth += 1
+    sb r10, r0, 62                  # ray->ray_depth = ray->ray_depth + 1
     beq r15, r15, START_SEARCHING, true
 
+#UNCONDITIONAL BRANCH
+
 SHADOW_RAY_OCCLUDED:
-    and r7, r7, 0
+    lw r10, RAYS_COMPLETED_HIGH     # r10 = rays_completed_high
+    setmembits r10                  # set_address_bits(finished_ray_high);
+    lw r11, RAYS_COMPLETED_LOW      # r11 = rays_completed_low
+    atomadd_d r12, r11, 1           # r11 = rays_completed_low = rays_completed_low + 1
+
     # BIG TODO; Alex explain the math for ray_result_addr stuff
 
-    # uint32_t finished_ray_high = self.ray_result_addr_high;
-    lw r10, RAY_RESULT_HIGH # r10 = finished_ray_high TODO Alex tf is this
-
-    # set_address_bits(finished_ray_high);
-    setmembits r10
-
+    # uint32_t finished_ray_high = self.ray_result_addr_high; TODO ALEX TO CONFIRM THIS CHUNK
+    lw r10, RAY_RESULT_HIGH         # r10 = ray_result_high
+    setmembits r10                  # set_address_bits(finished_ray_high);
     # uint32_t result_addr_low = self.ray_result_addr_low;
-    lw r11, RAY_RESULT_LOW # r11 = result_addr_low
-
+    lw r11, RAY_RESULT_LOW          # r11 = ray_result_low
     # atomic_add_dram(result_addr_low, 1); // increment finished ray counter
     atomadd_d r12, r11, 1           # r12 = old finished ray count, increment
 
     # uint32_t pix_index = ray->pix_y;
-    lhu r13, r0, 54         # r13 = pix_index
-
-    # pix_index *= 2560;
-    sll r13, r13, 9         # r13 = pix_index * 512
-    add r12, r13, 0         # r12 = pix_index * 512
-    sll r13, r13, 2         # r13 = pix_index * 2048
-    add r12, r13, r12        # r12 = pix_index * 2560
+    lhu r13, r0, 54                  # r13 = ray->pix_y
+    sll r13, r13, 9                  # r13 = pix_y * 512  
+    add r12, r13, 0                  # r12 = pix_y * 512
+    sll r13, r13, 2                  # r13 = pix_y * 2048
+    add r12, r13, r12                # r12 = pix_y * 2560
 
     # pix_index += ray->pix_x;
-    lhu r13, r0, 52         # r13 = ray -> pix_x 
-    add r12, r13, r12        # pix_index += pix_x
+    lhu r13, r0, 52                  # r13 = ray -> pix_x 
+    add r12, r13, r12                # r12 = pix_y * 2560 + pix_x = pix_index
+    sll r12, r12, 8                  # r12 = pix_index <<= 8
+    add r11, r12, r11                # r11 = result_addr_low + pix_index
 
-    # pix_index <<= 8;
-    sll r12, r12, 8         # pix_index <<= 8
+    lbu r10, r0, 60                  # r10 = ray->bounce_count = bounce
+    sll r10, r10, 6                  # r10 = bounce << 6
+    add r11, r10, r11                # r11 = result_addr_low + pix_index + bounce
 
-    # result_addr_low += pix_index;
-    add r11, r12, r11        # result_addr_low += pix_index
-
-    # uint32_t bounce = ray->bounce_count;
-    lbu r10, r0, 60         # r10 = bounce_count
-
-    # bounce <<= 6;
-    sll r10, r10, 6         # bounce <<= 6
-
-    # result_addr_low += bounce;
-    add r11, r10, r11        # result_addr_low += bounce
-
-    # uint32_t shadow = ray->light_id;
-    lbu r10, r0, 61         # r10 = shadow
-
-    # result_addr_low += shadow << 4;
-    sll r10, r10, 4         # shadow <<= 4
-    add r11, r10, r11        # result_addr_low += shadow
+    lbu r10, r0, 61                  # r10 = ray->light_id = shadow
+    sll r10, r10, 4                  # r10 = shadow << 4
+    add r11, r10, r11                # r11 = result_addr_low = result_addr_low + pix_index + shadow << 4
 
     # Write 1.0 to len_sq slot to mark as occluded (blocked)
     # uint32_t one = 0x3F800000;
-    lw r10, ONE
-
-    # store_dram_word(result_addr_low + 12, one);
-    add r11, r11, 12         # r11 = result_addr_low + 12
-    sw_d r10, r11, 0         # store 1.0 to len_sq slot
+    lw r10, ONE                     # r10 = 0x3F800000
+    add r11, r11, 12                # r11 = result_addr_low + 12
+    sw_d r10, r11, 0                # store_dram_word(result_addr_low + 12, one)
 
     # ray->active_ray = 0;
-    sb r7, r0, 63           # ray->active_ray = 0 (r7=0)
+    and r7, r7, 0                   #r7 = 0
+    sb r7, r0, 63                   # ray->active_ray = 0 (r7=0)
 
-    # goto ray_done;
-    # redunant
+#RYAN VALIDATED ENDS
 
 ray_done:
     # ; if (ray->active_ray == 1) { goto start_ray_traversal; }
@@ -1458,13 +1501,14 @@ NOT_PREVIOUSLY_IDLE:
     blte r4, r5, ONLY_ENQUEUE_ONCE_IDLE_QUEUE, false # if ratio >= threshold goto ONLY_ENQUEUE_ONCE_IDLE_QUEUE (busy enough)
     jmp r15, r2                             # return 0 (not idle enough to enqueue)
 ONLY_ENQUEUE_ONCE_IDLE_QUEUE:
+    add r6, r2, 0
     jmp r2, ADD_IDLE_CORE
     and r3, r3, 0
     add r3, r3, PREVIOUSLY_IDLE
     atomadd r3, r3, 1    
     and r14, r14, 0                         # r14 = 0 (zero register)
     add r14, r14, 1
-    jmp r15, r2                             # return 0 (already marked idle, nothing to do)
+    jmp r15, r6                             # return 0 (already marked idle, nothing to do)
 
 
 
@@ -1644,7 +1688,7 @@ RECIPROCAL:
     xor r11, r11, 0xFFFF                # r11 = 0x7FFFFFFF
     and r11, r11, r9                    # r11 = |x|
     srl r13, r11, 23                    # r13 = exp (from |x|, NO sign pollution)
-    sub r13, r13, 254                   # r13 = 253 - exp = new_exp
+    sub r13, r13, 253                   # r13 = 253 - exp = new_exp
     srl r9, r11, 10                     # r9 = |x| >> 10 (from |x|, NO sign pollution)
     and r9, r9, 0x1FFC                  # 11-bit mantissa index, byte-aligned
     lw r14, DIV_TABLE_HIGH
@@ -1741,7 +1785,7 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     and r11, r6, r8                         # r11 = (tmin <= tmax) && (0.0 < tmax)
     beq r15, r15, AABB_INTERSECT_RETURN, true # return r11
 
-
+#UNCONDITIONAL BRANCH
 
 EAT_RAY_INTERRUPT: #working with r6-r14
     add r4, r8, 0                           # r4 = return address (saved from r8 by caller convention)
@@ -1753,16 +1797,27 @@ EAT_RAY_INTERRUPT: #working with r6-r14
     jmp r15, r4                             # return
 CONTINUE_WITH_EAT_RAY_INTERRUPT:
     block r7, 32                                # r7 = blocking_recv(channel) (full flit value)
+    add r5, r7, 0                           # save full message
+    and r6, r15, 0xF                        # save return address to per-thread SRAM slot
+    sll r6, r6, 2
+    add r6, r6, EAT_RAY_RETURN_ADDR
+    sw r4, r6, 0
     lw r8, EAT_RAY_MASK                     # r8 = EAT_RAY_MASK (isolates core_id field)
     and r8, r7, r8                          # r8 = core_id = flit & EAT_RAY_MASK
     srl r13, r7, 17                         # r13 = node_id = flit >> 17
     lw r9, ROOT_NODE_ID              # r9 = self.node_id (sender side)
     beq r13, r9, NODE_IDS_MATCH, true      # if node_id == sender_node_id goto NODE_IDS_MATCH
 reject_ray_interrupt:
+    and r6, r15, 0xF                        # reset saved return addr (not reaching SEND_ACK_PACKET)
+    sll r6, r6, 2
+    add r6, r6, EAT_RAY_RETURN_ADDR
+    and r9, r9, 0
+    add r9, r9, -1
+    sw r9, r6, 0
     add r10, r14, 8                         # r10 = wrong_core = 8 (reject code)
     sll r10, r10, 24                        # r10 = wrong_core << 24
-    and r11, r7, 0xF                       # r11 = self.thread_id (low 4 bits)
-    and r12, r7, 0xFFF0                      # r12 = core_id high nibble
+    and r11, r5, 0xF                       # r11 = self.thread_id (low 4 bits)
+    and r12, r5, 0xFFF0                      # r12 = core_id high nibble
     sll r12, r12, 15
     srl r12, r12, 15
     sll r12, r12, 2                         # r12 = core_id high nibble shifted to channel position
@@ -1774,9 +1829,9 @@ reject_ray_interrupt:
 NODE_IDS_MATCH:
     lw r7, LOCAL_QUEUE_FLUSHING             # r7 = *(self.local_queue_flushing)
     bne r14, r7, reject_ray_interrupt, false # if flushing_queue != 0 goto reject_ray_interrupt
-    lbu r7, r0, 63                          # r7 = ray->active_ray (byte at ray+63)
-    add r9, r0, 0                           # r9 = local_queue = ray base address
-    beq r14, r7, RECEIVE_RAY_DATA, false   # if ray slot is empty (active_ray == 0) goto RECEIVE_RAY_DATA
+    lbu r9, r0, 63                          # r7 = ray->active_ray (byte at ray+63)
+    add r7, r0, 0                           # r9 = local_queue = ray base address
+    beq r14, r9, RECEIVE_RAY_DATA, false   # if ray slot is empty (active_ray == 0) goto RECEIVE_RAY_DATA
     add r9, r14, RAY_QUEUE_CNT                # r9 = sender ray queue base address
     atomadd r7, r9, 1                       # r7 = old_count = atomic_add(&queue.count, 1)
     add r12, r14, 16                        # r12 = 16 (max queue entries)
@@ -1845,6 +1900,12 @@ RECEIVE_RAY_DATA:
     sw r10, r7, 52                          # slot[52] = ray_data[13]
     sw r11, r7, 56                          # slot[56] = ray_data[14]
     sw r12, r7, 60                          # slot[60] = ray_data[15]
+    and r9, r14, 0                          # reset EAT_RAY_RETURN_ADDR[tid] = -1
+    add r9, r9, -1
+    and r10, r15, 0xF
+    sll r10, r10, 2
+    add r10, r10, EAT_RAY_RETURN_ADDR
+    sw r9, r10, 0
     lw r1, ROOT_NODE_ADDRESS
     intena 32                               # enable_interrupts(channel)
     jmp r15, r4                             # return
@@ -1900,11 +1961,11 @@ FOUND_BRANCH_CORE_NODE:
 
 dfs_loop:
     # if (stack_top == DFS_STACK) goto dfs_done;
-    and r14, r14, 0
-    add r11, r14, DFS_STACK
-    beq r2, r11, dfs_done, true
+    and r14, r14, 0                          #r14 = 0
+    add r11, r14, DFS_STACK                  #r11 = DFS_STACK address
+    beq r2, r11, dfs_done, true              #If stack_top == self.dfs_stack address, go to dfs_done
 
-    add r2, r2, -16
+    add r2, r2, -16                         #stack_top -= 16;
     lw r4, r2, 0                             # dram_idx
     lhu r5, r2, 4                            # parent_ptr
     lhu r6, r2, 6                            # patch_left
@@ -1955,6 +2016,8 @@ NOT_BRANCH_IMPORT:
     sh r10, r13, 40                          # queue_high_bit_addr
     lw_d r10, r12, 36
     sw r10, r13, 36                          # queue_low_bit_addr
+    lhu_d r10, r12, 32                       # tri_start (uint16) from DRAM
+    sh r10, r13, 32                          # store at SRAM offset 32
     lw_d r10, r12, 44
     sw r10, r13, 44                          # node_id
 SKIP_NON_BRANCH_IMPORT:
@@ -1977,18 +2040,21 @@ SKIP_NON_BRANCH_IMPORT:
     or r14, r14, 0xFFFF
     beq r5, r14, SKIP_PATCH, true
     and r14, r14, 0
-    beq r8, r14, PATCH_RIGHT_CHILD, true
+    bne r8, r14, PATCH_RIGHT_CHILD, true
     sh r13, r6, 0                            # *patch_left = node
     beq r15, r15, SKIP_PATCH, true
 PATCH_RIGHT_CHILD:
     sh r13, r7, 0                            # *patch_right = node
 SKIP_PATCH:
-    lbu r10, r13, 31
-    and r14, r14, 0
-    bne r10, r14, dfs_loop, false
-    lw r10, r13, 36                         
+    lbu r10, r13, 30        #load is_right
+    and r14, r14, 0         #r14 = 0
+    bne r10, r14, dfs_loop, false       #if is_right != 0, dfs_loop
+    lw r10, r13, 36                #r10 == queue_low_bit_addr   
     bne r10, r11, CHECK_RECURSE, true
-    sw r13, ROOT_NODE_ID
+    sw r13, ROOT_NODE_ADDRESS          # store the SRAM node pointer
+    #lw r10, r13, 44                    # node_id was just copied to SRAM at offset 44
+    #sw r10, ROOT_NODE_ID 
+    #sw r13, ROOT_NODE_ID
 CHECK_RECURSE:
     lw r14, BRANCH_START_OF_GEO
     beq r13, r14, DO_RECURSE, true
@@ -2006,7 +2072,10 @@ CHECK_RECURSE:
     bne r14, r10, dfs_loop, false
     add r10, r14, LEAF_CORE_INDEX_FOR_BRANCH
     atomadd r15, r10, 1
-    beq r15, r15, dfs_loop, true            
+    beq r15, r15, dfs_loop, true  
+
+#UNCONDITIONAL JUMP
+
 SET_NODE_ID:
     add r10, r14, 1
     sw r10, FOUND_LEAF_CORE_INDEX_FOR_BRANCH
@@ -2015,6 +2084,9 @@ SET_NODE_ID:
     lw r10, SRAM_NODE_ALLOC_PTR
     add r10, r10, -48
     sw r10, ROOT_NODE_ADDRESS
+
+#START RYAN VALIDATE
+
 DO_RECURSE:
     # -- push right child first (so left is processed first) --
     and r14, r14, 0
@@ -2022,6 +2094,9 @@ DO_RECURSE:
     srl r11, r11, 8
     add r10, r11, 1                          #right index
     add r12, r9, 1                           # child_depth = depth + 1
+
+
+#END RYAN VALIDATE
 
     sw r10, r2, 0                            # right_idx
     sh r13, r2, 4                            # parent = node
@@ -2046,6 +2121,8 @@ DO_RECURSE:
     add r2, r2, 16
 
     beq r15, r15, dfs_loop, true
+
+#UNCONDITIONAL BRANCH
 
 dfs_done:
     # *(self.leaf_core_lookup_table + 256) = self->root_node;
@@ -2317,7 +2394,7 @@ jmp r15, SWITCH_ROLES_INTERRUPT
 LEAF_START_OF_GEO:
 .data 1234
 leaf_start_of_code:
-.data 28
+.data 44
 BRANCH_LOCAL_LEAF_INDEX:
 .data -1
 NODE_ID_TABLE_HIGH:            
@@ -2335,9 +2412,9 @@ SRAM_NODE_ALLOC_PTR:
 NODE_ARRAY_TOP:         
 .data 16128
 BRANCH_START_OF_CODE:    
-.data 32
+.data 44
 BRANCH_NUM_INSTRUCTION_BYTES: 
-.data 9000
+.data 9000 #17284
 BRANCH_START_OF_GEO:     
 .data 16128
 BRANCH_SIZE_OF_GEO:      
@@ -2487,3 +2564,5 @@ INDEX_ARRAY_BASE:
 .data -1
 ROOT_NODE_ADDRESS:
 .data -1
+EAT_RAY_RETURN_ADDR:
+.data(16) -1
