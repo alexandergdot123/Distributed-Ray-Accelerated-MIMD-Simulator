@@ -1,8 +1,10 @@
-# DRÆM — Distributed Ray-Accelerated Engine through MIMD
+# DRÆM: Distributed Ray-Accelerated Engine through MIMD
 
 *A tiled MIMD accelerator architecture for hardware ray tracing, its cycle-accurate Rust simulator, and the full toolchain (BVH partitioner, custom assembler, CUDA baseline, and telemetry visualizer) built to evaluate it.*
 
-**Alexander Gallagher · Saipranav Venkatakrishnan · Ryan Horstman** — University of Illinois Urbana-Champaign, ECE 511, Spring 2026
+**Alexander Gallagher · Saipranav Venkatakrishnan · Ryan Horstman**, University of Illinois Urbana-Champaign, ECE 511, Spring 2026
+
+This project designs, from scratch, a full alternative hardware architecture for ray tracing, then proves it out end to end instead of just describing it on paper. We built a cycle-accurate multithreaded simulator in Rust that models 8,192 independent MIMD cores arranged in a 128×64 mesh across 8 DRAM stacks, each core carrying its own 48 KB SRAM, 16 hardware thread contexts with scoreboarded register readiness, a pipelined FP32/FP16/FP8 datapath, and a NoC router, all synchronized cycle-by-cycle across parallel OS threads with a real barrier. To actually run programs on that chip, we designed a custom 32-bit instruction set from the ground up and wrote a two-pass assembler for it in Rust, then hand-wrote roughly 4,500 lines of firmware in that ISA implementing the full ray lifecycle: BVH subtree download, AABB traversal, ray forwarding across the mesh, shadow and bounce ray spawning, and pixel accumulation, including a from-scratch deadlock-avoidance protocol for the ray-forwarding graph and a dynamic core-cloning mechanism for runtime load balancing. On top of that we built a BVH preprocessing pipeline that imports OBJ scenes and partitions the hierarchy across the simulated mesh using spectral embedding and simulated annealing to minimize on-chip wire length, a telemetry pipeline that exports per-cycle NoC congestion, DRAM traffic, and core utilization for visualization, and an independent, hand-optimized CUDA path tracer used as a rigorously profiled GPU baseline (validated on real hardware via Nsight Compute and cross-checked against an AccelSim RTX 3090-class model) to argue the case against SIMT quantitatively rather than by assertion. The result is a working simulator that boots real firmware, loads real geometry, executes real ray traversal, and reproduces the exact load-imbalance signature the architecture predicts, all built and debugged by a three-person team in a single semester.
 
 📄 [Read the full paper](docs/ECE511_Project_Paper.pdf) for the complete methodology, related work, and citations. This README summarizes it and documents how the code in this repo maps to it.
 
@@ -28,7 +30,7 @@
 
 Modern GPU ray tracing is bottlenecked by the SIMT execution model itself, not by a lack of fixed-function hardware: per-ray BVH traversal paths diverge, causing warps to serialize; BVH traversal is a pointer-chasing access pattern that defeats caches built for spatial/temporal locality; and load across rays is inherently unbalanced. Dedicated RT Cores accelerate the intersection math but don't fix any of these three structural problems.
 
-**DRÆM** is a proposed alternative: a 2D mesh of thousands of simple, deeply-multithreaded MIMD cores, each holding a private slice of BVH geometry in on-chip SRAM. Instead of grouping rays into warps and stalling on divergence, DRÆM turns traversal into an explicit message-routing problem — a ray is a message that hops across a Network-on-Chip (NoC) to whichever core owns the next relevant piece of the BVH. This:
+**DRÆM** is a proposed alternative: a 2D mesh of thousands of simple, deeply-multithreaded MIMD cores, each holding a private slice of BVH geometry in on-chip SRAM. Instead of grouping rays into warps and stalling on divergence, DRÆM turns traversal into an explicit message-routing problem: a ray is a message that hops across a Network-on-Chip (NoC) to whichever core owns the next relevant piece of the BVH. This:
 
 - eliminates warp divergence by construction (there is no warp),
 - removes DRAM from the traversal critical path (every intersection test reads from local SRAM), and
@@ -38,11 +40,11 @@ This repo contains the full stack we built to evaluate that idea:
 
 1. A **BVH preprocessing pipeline** that imports an OBJ scene, builds a BVH, and partitions it across an 8,192-core mesh.
 2. A **custom two-pass assembler** for DRÆM's hand-designed 32-bit ISA.
-3. A **cycle-accurate multithreaded Rust simulator** of the full chip — 8,192 cores across 8 DRAM stacks, NoC routing, per-context register scoreboarding, the works.
+3. A **cycle-accurate multithreaded Rust simulator** of the full chip: 8,192 cores across 8 DRAM stacks, NoC routing, per-context register scoreboarding, the works.
 4. A **CUDA baseline** ray tracer, profiled on real hardware and through AccelSim, used as the SIMT/GPU point of comparison.
 5. A **telemetry visualizer** that turns the simulator's per-cycle logs into heatmaps and time-lapse videos of NoC congestion, DRAM traffic, and core utilization.
 
-DRÆM is **not** pitched as beating GPUs with RT Cores head-to-head — that's future work (see [Project status](#project-status)). It's an existence proof, backed by a working simulator, that the three SIMT pathologies above are avoidable by design.
+DRÆM is **not** pitched as beating GPUs with RT Cores head-to-head; that's future work (see [Project status](#project-status)). It's an existence proof, backed by a working simulator, that the three SIMT pathologies above are avoidable by design.
 
 ## Why GPUs struggle with ray tracing
 
@@ -62,7 +64,7 @@ The chip is a 128×64 2D mesh of cores (XY-routed, bidirectional NoC), organized
 
 <img src="docs/figures/core_architecture.png" alt="Per-core area breakdown: 48KB SRAM, pipelined FP MAC, register file, ALU, NoC router, div/mod unit, scoreboard" width="500">
 
-Each core has **48 KB of private SRAM** (roughly half its modeled die area), a pipelined FP32/FP16/FP8 (E4M3) MAC unit, an integer ALU, a NoC router, a divide/modulo unit, and a scoreboard managing **16 hardware thread contexts × 16 registers each** — a barrel-multithreaded design that hides NoC and DRAM latency by switching contexts instead of stalling. The instruction pipeline is two-stage (fetch/execute) with branch hints encoded directly in the instruction word.
+Each core has **48 KB of private SRAM** (roughly half its modeled die area), a pipelined FP32/FP16/FP8 (E4M3) MAC unit, an integer ALU, a NoC router, a divide/modulo unit, and a scoreboard managing **16 hardware thread contexts × 16 registers each**, a barrel-multithreaded design that hides NoC and DRAM latency by switching contexts instead of stalling. The instruction pipeline is two-stage (fetch/execute) with branch hints encoded directly in the instruction word.
 
 **BVH partitioning.** Before rendering, the BVH is partitioned with a depth-first traversal that greedily accumulates nodes into subtrees bounded by each core's SRAM budget (accounting for node AABBs, triangle index lists, material pointers, and deduplicated vertex data via a fixed-point spatial hash). This produces two core roles:
 
@@ -71,7 +73,7 @@ Each core has **48 KB of private SRAM** (roughly half its modeled die area), a p
 - **Leaf cores** own terminal BVH subtrees *with* triangle data and perform full Möller–Trumbore intersection entirely from local SRAM.
 - **Branch cores** own the upper levels of the hierarchy and route rays toward the correct child core over the NoC, performing AABB slab tests at each hop.
 
-**Ray routing & deadlock avoidance.** A ray is packaged as a 16-flit NoC message and forwarded hop-by-hop. Because branch cores both receive rays from upstream and forward to leaf cores downstream, naive routing can deadlock (a branch core's incoming queue fills waiting on a leaf core, while that leaf core is waiting to forward a completed ray back through the same branch core). DRÆM breaks this cycle two ways: leaf cores store pointers to sibling leaves so they can forward directly without re-entering the branch core, and each branch core's thread contexts are virtualized into two halves — one for rays entering from the broader mesh, one for rays returning from owned leaf cores — turning the ray-flow graph into a DAG by construction.
+**Ray routing & deadlock avoidance.** A ray is packaged as a 16-flit NoC message and forwarded hop-by-hop. Because branch cores both receive rays from upstream and forward to leaf cores downstream, naive routing can deadlock (a branch core's incoming queue fills waiting on a leaf core, while that leaf core is waiting to forward a completed ray back through the same branch core). DRÆM breaks this cycle two ways: leaf cores store pointers to sibling leaves so they can forward directly without re-entering the branch core, and each branch core's thread contexts are virtualized into two halves (one for rays entering from the broader mesh, one for rays returning from owned leaf cores), turning the ray-flow graph into a DAG by construction.
 
 **Dynamic core cloning.** Each core monitors its own forwarding rate. A core that falls below a threshold marks itself idle and registers in a spatially-organized DRAM-backed idle-core tree. A core whose ray queue backs up beyond a threshold searches that tree (bottom-up from its own position, to minimize NoC transfer distance) for an idle neighbor, then transmits its firmware and geometry to it over the NoC so the neighbor can start draining rays for the same treelet. This is the architecture's mechanism for turning the load-imbalance problem visible in [Results](#results) into something it can actually respond to.
 
@@ -110,11 +112,11 @@ In parallel, `raytracer.cu` is an independent CUDA path tracer (BVH4, built from
 
 | Directory | What it is |
 |---|---|
-| [`bvh_assembler/`](bvh_assembler/) | C++ BVH builder (wraps [tinybvh](https://github.com/jbikker/tinybvh) + [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) — see [Third-party code](#third-party-code)) plus the Python scene-prep, BVH-verification, and core-placement scripts. |
+| [`bvh_assembler/`](bvh_assembler/) | C++ BVH builder (wraps [tinybvh](https://github.com/jbikker/tinybvh) + [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader), see [Third-party code](#third-party-code)) plus the Python scene-prep, BVH-verification, and core-placement scripts. |
 | [`assembler/rust_assembler_mimd/`](assembler/rust_assembler_mimd/) | The custom two-pass assembler for DRÆM's ISA, the hand-written `.s` firmware programs, and the C pseudocode they were designed against. |
 | [`rust_rt_arch_sim/`](rust_rt_arch_sim/) | The simulator itself: the 8,192-core NoC/DRAM/pipeline model (`core.rs`), the BVH ingestion & partitioning code (`parse_bvh.rs`), and the driver (`main.rs`). |
 | [`python_sim_visualizer/`](python_sim_visualizer/) | Turns `sim_logs/*.npy` into the heatmaps/videos used to inspect NoC congestion, DRAM traffic, and core busy time. |
-| [`raytracer.cu`](raytracer.cu) | Standalone CUDA path tracer — the GPU baseline profiled with Nsight Compute and AccelSim in the paper's evaluation. |
+| [`raytracer.cu`](raytracer.cu) | Standalone CUDA path tracer, the GPU baseline profiled with Nsight Compute and AccelSim in the paper's evaluation. |
 
 ## Building and running
 
@@ -171,20 +173,20 @@ All figures and numbers below are from [the paper](docs/ECE511_Project_Paper.pdf
 
 **GPU baseline (CUDA, profiled on an RTX 3060 Laptop GPU via Nsight Compute, extrapolated to RTX 3090-class SM count, and cross-checked with AccelSim's execution-driven GPGPU-Sim mode):**
 
-- Sustained **90.57%** compute and memory throughput simultaneously over 300.8M cycles at 1.30 GHz; the LSU pipeline was the most heavily utilized unit (90.6% of executed instructions) — consistent with a memory-bound BVH traversal workload.
-- Average active threads per warp: **17.66 / 32** — Nsight estimates a **41.9%** potential speedup from eliminating divergence alone.
-- Global memory loads utilized only **4.0 of 32 bytes** per transmitted cache sector, producing over 2 billion excess sectors (23% of all global traffic) — confirming the non-coalesced, pointer-chasing access pattern BVH traversal is known for.
+- Sustained **90.57%** compute and memory throughput simultaneously over 300.8M cycles at 1.30 GHz; the LSU pipeline was the most heavily utilized unit (90.6% of executed instructions), consistent with a memory-bound BVH traversal workload.
+- Average active threads per warp: **17.66 / 32**; Nsight estimates a **41.9%** potential speedup from eliminating divergence alone.
+- Global memory loads utilized only **4.0 of 32 bytes** per transmitted cache sector, producing over 2 billion excess sectors (23% of all global traffic), confirming the non-coalesced, pointer-chasing access pattern BVH traversal is known for.
 - An AccelSim run against an RTX 3090-class configuration at 256×256 resolution produced 57.26M cycles at 1.132 GHz with 86 active SMs, and **28.7%** of cycles had *no* warp available to execute due to pending memory accesses.
 
-**DRÆM (Rust simulator, preliminary — 150,000 simulation cycles, dynamic core cloning not yet exercised):**
+**DRÆM (Rust simulator, preliminary: 150,000 simulation cycles, dynamic core cloning not yet exercised):**
 
 - 15 rays completed end-to-end, averaging ~10,000 cycles/ray. Early-stage numbers, expected to improve substantially with longer runs.
-- Branch cores performed 48,238 AABB tests in the window. Per-core rates ranged from 0–15 tests on lightly-hit geometry up to ~300 tests on the most heavily traversed subtrees — directly confirming the load-imbalance-by-geometry the architecture predicts.
+- Branch cores performed 48,238 AABB tests in the window. Per-core rates ranged from 0-15 tests on lightly-hit geometry up to ~300 tests on the most heavily traversed subtrees, directly confirming the load-imbalance-by-geometry the architecture predicts.
 - Memory traffic: 123,039,836 bytes of local ("close") DRAM traffic vs. 176,123,762 bytes of cross-stack ("far") traffic. The far/close skew in this window is attributed to the one-time SRAM initialization sequence (every core has to pull its BVH subtree from DRAM before it can process a single ray), which is expected to shrink as a fraction of total traffic in longer runs.
 
 <img src="docs/figures/aabb_heatmap.png" alt="Heatmap of AABB test counts per core over the 128x64 mesh, showing a small number of hot cores" width="560">
 
-*AABB test count per core across the mesh — a small number of cores (bright red) do the overwhelming majority of the traversal work.*
+*AABB test count per core across the mesh: a small number of cores (bright red) do the overwhelming majority of the traversal work.*
 
 <img src="docs/figures/noc_utilization.png" alt="Heatmap of per-core NoC busy fraction at t=310, showing a hot cluster" width="560">
 
@@ -194,7 +196,7 @@ All figures and numbers below are from [the paper](docs/ECE511_Project_Paper.pdf
 
 *Close vs. far DRAM traffic across the mesh (log scale), plus the aggregate read/write breakdown.*
 
-**Reading the result:** on a GPU, a warp stalled on a divergent thread can't help other warps — the imbalance is invisible to the scheduler at the right granularity. On DRÆM, the same imbalance shows up as a specific core's ray queue filling up, which is exactly the signal dynamic core cloning is designed to act on. The 150K-cycle window shows the imbalance emerging as predicted; it doesn't yet show cloning resolving it, since cloning hadn't been exercised in this run. That's the immediate next experiment.
+**Reading the result:** on a GPU, a warp stalled on a divergent thread can't help other warps; the imbalance is invisible to the scheduler at the right granularity. On DRÆM, the same imbalance shows up as a specific core's ray queue filling up, which is exactly the signal dynamic core cloning is designed to act on. The 150K-cycle window shows the imbalance emerging as predicted; it doesn't yet show cloning resolving it, since cloning hadn't been exercised in this run. That's the immediate next experiment.
 
 ## Project status
 
@@ -202,16 +204,16 @@ All figures and numbers below are from [the paper](docs/ECE511_Project_Paper.pdf
 
 **Known limitations / explicitly future work, per the paper's conclusion:**
 - Only 150K cycles / 15 completed rays have been collected so far; longer runs are needed for statistically meaningful throughput comparisons.
-- Dynamic core cloning is implemented in the design but hasn't yet been exercised in a run — the collected metrics show *why* it's needed, not yet whether it works.
+- Dynamic core cloning is implemented in the design but hasn't yet been exercised in a run; the collected metrics show *why* it's needed, not yet whether it works.
 - Load-balancing firmware was the most time-consuming part of the project and is the area most likely to need further debugging (some of the leaf-core mailbox/locking logic was still being actively hardened in the final commits).
-- No direct comparison against fixed-function RT Cores (NVIDIA) or Ray Accelerators (AMD) has been run yet — the current CUDA baseline deliberately disables fixed-function acceleration to isolate a programmable-compute-vs-programmable-compute comparison. A natural extension is comparing against an RT-Core-enabled AccelSim configuration or a Vulkan-Sim baseline.
+- No direct comparison against fixed-function RT Cores (NVIDIA) or Ray Accelerators (AMD) has been run yet; the current CUDA baseline deliberately disables fixed-function acceleration to isolate a programmable-compute-vs-programmable-compute comparison. A natural extension is comparing against an RT-Core-enabled AccelSim configuration or a Vulkan-Sim baseline.
 - A die-area estimate (~409 mm² for the 8,192-core DRÆM array, modeled after a Cerebras wafer-scale-engine core on TSMC N7, vs. ~377 mm² of programmable compute on an NVIDIA GA102 die) establishes a rough basis for architectural comparison but is not a fabrication-level estimate.
 
 ## Team & contributions
 
-- **Alexander Gallagher** — designed and implemented the Rust simulator (`rust_rt_arch_sim`) and the custom MIMD assembler (`rust_assembler_mimd`); co-wrote the hand-written ISA firmware and debugged it with Saipranav; co-wrote the CUDA baseline with Ryan.
-- **Saipranav Venkatakrishnan** — co-wrote and debugged the leaf-core/branch-core assembly firmware with Alexander.
-- **Ryan Horstman** — co-wrote the CUDA baseline ray tracer with Alexander.
+- **Alexander Gallagher**: designed and implemented the Rust simulator (`rust_rt_arch_sim`) and the custom MIMD assembler (`rust_assembler_mimd`); co-wrote the hand-written ISA firmware and debugged it with Saipranav; co-wrote the CUDA baseline with Ryan.
+- **Saipranav Venkatakrishnan**: co-wrote and debugged the leaf-core/branch-core assembly firmware with Alexander.
+- **Ryan Horstman**: co-wrote the CUDA baseline ray tracer with Alexander.
 
 ## Related work
 
@@ -221,10 +223,10 @@ DRÆM builds on and differentiates itself from several lines of prior work discu
 
 This repository does not include the source of the third-party libraries `bvh_assembler/` builds on:
 
-- **[tinybvh](https://github.com/jbikker/tinybvh)** by Jacco Bikker (MIT License) — BVH construction and traversal.
-- **[tinyobjloader](https://github.com/tinyobjloader/tinyobjloader)** by Syoyo Fujita and contributors (MIT License) — Wavefront OBJ parsing.
+- **[tinybvh](https://github.com/jbikker/tinybvh)** by Jacco Bikker (MIT License): BVH construction and traversal.
+- **[tinyobjloader](https://github.com/tinyobjloader/tinyobjloader)** by Syoyo Fujita and contributors (MIT License): Wavefront OBJ parsing.
 
-See [`bvh_assembler/THIRD_PARTY.md`](bvh_assembler/THIRD_PARTY.md) for how to obtain them. All other code in this repository — the simulator, the assembler, the BVH partitioning/placement scripts, the CUDA baseline, and the visualizer — was written for this project.
+See [`bvh_assembler/THIRD_PARTY.md`](bvh_assembler/THIRD_PARTY.md) for how to obtain them. All other code in this repository (the simulator, the assembler, the BVH partitioning/placement scripts, the CUDA baseline, and the visualizer) was written for this project.
 
 ## License
 
