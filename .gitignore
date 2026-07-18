@@ -20,3 +20,17 @@ rust_rt_arch_sim/src/auto_gen_code.rs
 assembler/rust_assembler_mimd/src/branch_core_code.txt
 assembler/rust_assembler_mimd/src/initialize_core.txt
 assembler/rust_assembler_mimd/src/leaf_core_code.txt
+
+# IDE cache
+.vs/
+.vscode/
+
+# C++ build artifacts
+bvh_assembler/*.exe
+bvh_assembler/*.obj
+
+# Scratch/experiment output folders
+rust_rt_arch_sim/alt/
+rust_rt_arch_sim/backup/
+bvh_assembler/prev_outs/
+bvh_assembler/grid/

@@ -1,1 +1,6 @@
 scene.txt
+
+# Third-party single-header libraries (not authored by this project).
+# See bvh_assembler/README.md / THIRD_PARTY.md for download instructions.
+tiny_bvh.h
+tiny_obj_loader.h
