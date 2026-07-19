@@ -6,7 +6,7 @@
 
 This project designs, from scratch, a full alternative hardware architecture for ray tracing, then simulates it end-to-end. We built a cycle-accurate multithreaded simulator in Rust that models 8,192 independent MIMD cores arranged in a 128×64 mesh across 8 tiles, each core carrying its own 48 KB SRAM, 16 hardware thread contexts with scoreboarded register readiness, a pipelined FP32/FP16/FP8 datapath, and a NoC router, all synchronized cycle-by-cycle across parallel OS threads with a real barrier. To run programs in this simulator, we designed a custom 32-bit instruction set from the ground up and wrote a two-pass assembler for it in Rust, then hand-wrote roughly 4,500 lines of firmware in that ISA implementing the full ray lifecycle: BVH subtree download, AABB traversal, ray forwarding across the mesh, shadow and bounce ray spawning, and pixel accumulation, including a from-scratch deadlock-avoidance protocol for the ray-forwarding graph and a dynamic core-cloning mechanism for runtime load balancing. On top of that, we built a BVH preprocessing pipeline that imports OBJ scenes and partitions the hierarchy across the simulated mesh using spectral embedding and simulated annealing to minimize on-chip wire length, a telemetry pipeline that exports per-cycle NoC congestion, DRAM traffic, and core utilization for visualization, and an independent, hand-optimized CUDA path tracer used as a rigorously profiled GPU baseline (validated on real hardware via Nsight Compute and cross-checked against an AccelSim RTX 3090-class model). The result is a working simulator that boots real firmware, loads real geometry, executes real ray traversal, and reproduces the exact load-imbalance signature the architecture predicts.
 
-📄 [Read the full paper](docs/ECE511_Project_Paper.pdf) for the complete methodology, related work, and citations. This README summarizes it and documents how the code in this repo maps to it.
+📄 [Read the full paper](ECE511_Project_Paper.pdf) for the complete methodology, related work, and citations. This README summarizes it and documents how the code in this repo maps to it.
 
 ---
 
@@ -160,7 +160,7 @@ nvcc raytracer.cu -o raytracer
 
 ## Results
 
-All figures and numbers below are from [the paper](docs/ECE511_Project_Paper.pdf); see it for full methodology.
+All figures and numbers below are from [the paper](ECE511_Project_Paper.pdf); see it for full methodology.
 
 **Benchmark scene.** A 1.9-million-triangle "room" scene, used identically across the CUDA baseline and the DRÆM simulator.
 
@@ -217,7 +217,7 @@ All figures and numbers below are from [the paper](docs/ECE511_Project_Paper.pdf
 
 ## Related work
 
-DRÆM builds on and differentiates itself from several lines of prior work discussed in depth in [the paper](docs/ECE511_Project_Paper.pdf): Vulkan-Sim's quantification of GPU ray tracing inefficiency; TRaX/STRaTA's MIMD ray tracing architectures; Aila & Karras's treelet-based incoherent ray scheduling; CoopRT and RayFlex's warp-cooperative and RTL-datapath approaches to RT units; and RayN/AQB8's near-memory and quantization-based memory optimizations. See the paper's Related Work and References sections for the full comparison and citations.
+DRÆM builds on and differentiates itself from several lines of prior work discussed in depth in [the paper](ECE511_Project_Paper.pdf): Vulkan-Sim's quantification of GPU ray tracing inefficiency; TRaX/STRaTA's MIMD ray tracing architectures; Aila & Karras's treelet-based incoherent ray scheduling; CoopRT and RayFlex's warp-cooperative and RTL-datapath approaches to RT units; and RayN/AQB8's near-memory and quantization-based memory optimizations. See the paper's Related Work and References sections for the full comparison and citations.
 
 ## Third-party code
 
