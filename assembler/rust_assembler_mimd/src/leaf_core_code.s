@@ -451,107 +451,35 @@ RETURN_FROM_INSERT_DRAM_QUEUE:
 
 START_RAY_TRAVERSAL:
     lw r1, ROOT_NODE_ADDRESS         # r1 = node
+    and r8, r8, 0                    # AI [53]: count rays started (was never incremented)
+    add r8, r8, RAYS_PROCESSED
+    atomadd r8, r8, 1
 START_SEARCHING:
+    # AI [SL] stackless traversal (STACKLESS_TRAVERSAL_PLAN.md): ray byte 62 = entry direction into node r1:
+    #   0 = from the parent (test this node), 1 = back from the left child (go right), 2 = back from the right child (go up).
+    #   Words 44 and 48 (old visited bitfields) are no longer used.
     yield r8                         # clobber r8
-    #LEFT CHILD CHECK
-    # uint32_t left_bitfield_check = ray->check_left & (1 << ray->ray_depth) | node->left_child == 0;
-    lbu r5, r0, 62                  # r5 = ray->ray_depth
-    and r4, r4, 0                   # r4 = 0
-    add r4, r4, 1                   # r4 = 1
-    sll r4, r4, r5                  # r4 = 1 << ray->ray_depth
-    lw r2, r0, 44                  # r2 = ray->check_left 
-    and r4, r4, r2                  # r4 = ray->check_left & (1 << ray->ray_depth)
-    lhu r6, r1, 24                  # r6 = node->left_child
-    and r7, r7, 0                   # r7 = 0
-    add r7, r7, 0xFFFF              # r7 = 0xFFFFFFFF (null sentinel), sign extended by ISA
-    srl r7, r7, 16                  # r7 = 0x0000FFFF
-    beq r6, r7, LEFT_CHILD_NULL, true  # if (node->left_child == 0x0000FFFF) then LEFT_CHILD_NULL
-
-    # if (node->left_child != 0x0000FFFF):
-    and r6, r6, 0                   #r6 = 0  WAS  r6 = node->left_child  # left_child != null => contribute 0
-    beq r15, r15, LEFT_BITFIELD_DONE, true
-
-#UNCONDITIONAL BRANCH
-
-# if (node->left_child == 0x0000FFFF)
-LEFT_CHILD_NULL:
-    and r6, r6, 0                   #r6 = 0  WAS  r6 = node->left_child
-    add r6, r6, 1                   #r6 = 1        # left_child == null => contribute 1 (forces visited)
-LEFT_BITFIELD_DONE:                 #r6 is either 0 or 1
-    or r4, r4, r6                   # r4 = left_bitfield_check; (0/1 | ray->check_left & (1 << ray->ray_depth))
-
-    #NOW RIGHT CHILD CHECK
-    #lbu r5, r0, 62                  #Removed because redundant
-    and r9, r9, 0                   #r9 = 0
-    add r9, r9, 1                   #r9 = 1
-    sll r9, r9, r5                  # r9 = 1 << ray->ray_depth
-    lw r3, r0, 48                   #r3 = ray->check_right                
-    and r9, r9, r3                  # r9 = ray->check_right & (1 << ray->ray_depth)
-    lhu r6, r1, 26                  # r6 = node->right_child
-    beq r6, r7, RIGHT_CHILD_NULL, true #if (node->right_child == 0x0000FFFF) then RIGHT_CHILD_NULL
-
-    # if (node->right_child == 0x0000FFFF)
-    and r6, r6, 0                   # r6 = 0 WAS node->right_child
-    beq r15, r15, RIGHT_BITFIELD_DONE, true
-
-#UNCONDITIONAL BRANCH
-
-RIGHT_CHILD_NULL:
-    and r6, r6, 0                   #r6 = 0 WAS node->right_child
-    add r6, r6, 0x1                 #r6 = 1;  right_child == null => contribute 1 (forces visited)
-RIGHT_BITFIELD_DONE:
-    or r9, r9, r6                   # r9 = right_bitfield_check; (0/1 | ray->check_right & (1 << ray->ray_depth))   
-
-    # if (left_bitfield_check != 0 && right_bitfield_check != 0) { ... }
-    and r6, r4, r9                  # r6 = left_bitfield_check & right_bitfield_check
-    and r7, r7, 0                   # r7 = 0
-    beq r6, r7, CHECK_BOTH_ZERO, true   # if (left_bitfield_check & right_bitfield_check) == 0 -> check other cases
-
-    # uint32_t bitfield = *(ray.check_left + node->is_right * 4);
-    lbu r7, r1, 30                  # r7 = node->is_right           WAS 0
-    sll r7, r7, 2                   # r7 = node->is_right * 4
-    add r6, r0, 44                  # r6 = &ray.check_left           WAS left_bitfield_check & right_bitfield_check
-    add r6, r7, r6                  # r6 = &ray.check_left + is_right*4
-    lw r8, r6, 0                    # r8 = bitfield = *(ray.check_left + node->is_right * 4)
-
-    # uint32_t or_value = 1 << (ray->ray_depth - 1);
-    #lbu r5, r0, 62  #removed bc redundant       # r5 = ray->ray_depth
-    add r5, r5, -1                  # r5 = ray_depth - 1
-    and r10, r10, 0                 #r10 = 0
-    add r10, r10, 1                 #r10 = 1
-    sll r10, r10, r5                # r10 = or_value = 1 << (ray->ray_depth - 1)
-
-    # bitfield |= or_value;
-    or r8, r8, r10                  # r8 = bitfield | or_value
-    sw r8, r6, 0                    # *(ray.check_left + is_right*4) = bitfield | or_value
-
-    and r7, r7, 0                   # r7 = 0            WAS node->is_right * 4;  WHY IS THIS HERE
-
-    # ray->ray_depth--;
-    #lbu r5, r0, 62      removed cuz redundant            # r5 = ray->ray_depth         WAS ray_depth - 1
-    # add r5, r5, -1    removed cuz redundant              # r5 = ray_depth - 1
-    sb r5, r0, 62                   # ray->ray_depth = ray->ray_depth - 1
-
-    # if (node->parent == 0x0000FFFF) goto send_ray_up;
-    lhu r6, r1, 28                  # r6 = node->parent
-    and r8, r8, 0                   # r8 = 0                WAS bitfield | or_value
-    add r8, r8, 0xFFFF              # r8 = 0xFFFFFFFF
-    srl r8, r8, 16                    # r8 = 0x0000FFFF
-    beq r6, r8, SEND_RAY_UP, true  # if (node->parent == 0x0000FFFF) then SEND_RAY_UP
-
-    lhu r1, r1, 28  #node = node->parent;           WAS node
+    lbu r2, r0, 62                    # r2 = entry direction (byte 62, was the depth byte)
+    and r7, r7, 0
+    beq r2, r7, SL_TEST, true        # from the parent: test this node
+    add r3, r7, 1
+    bne r2, r3, SL_ASCEND, true      # from the right child: both subtrees done, go up
+    sb r7, r0, 62                    # from the left child: enter the right child from its parent
+    lhu r1, r1, 26                   # r1 = node->right_child
     beq r15, r15, START_SEARCHING, true
-
-#UNCONDITIONAL BRANCH
-
-# if (left_bitfield_check & right_bitfield_check) == 0
-CHECK_BOTH_ZERO:
-    # else if (left_bitfield_check == 0 && right_bitfield_check == 0)
-    or r6, r4, r9                   # r6 = left_bitfield_check | right_bitfield_check
-    bne r6, r7, TRAVERSE_LEFT_OR_RIGHT, false    # if (left_bitfield_check | right_bitfield_check) != 0 then TRAVERSE_LEFT_OR_RIGHT
-                                                 # one subtree not yt visited, descend into it;
-    # if (left_bitfield_check | right_bitfield_check) == 0:
-    jmp r8, AABB_INTERSECT 
+SL_ASCEND:                           # leave node r1 upward (miss, leaf done, or both children done). Clobbers r6-r8.
+    lbu r6, r1, 30                   # r6 = node->is_right
+    add r6, r6, 1                    # 1 = back from the left child, 2 = back from the right child
+    sb r6, r0, 62
+    lhu r6, r1, 28                   # r6 = node->parent
+    and r7, r7, 0
+    or r8, r7, 0xFFFF
+    srl r8, r8, 16                   # r8 = 0x0000FFFF
+    beq r6, r8, SEND_RAY_UP, true    # top of my copy of the tree: hand the ray to its owner (r1 = top node, r7 = 0)
+    add r1, r6, 0
+    beq r15, r15, START_SEARCHING, true
+SL_TEST:
+    jmp r8, AABB_INTERSECT           # r0 = ray, r1 = node, r7 = 0
 
 #UNCONDITIONAL BRANCH
 
@@ -566,10 +494,7 @@ AABB_INTERSECT_RETURN: #r11 = 1 (hit), 0 (miss), r7 = 0
 
 # if (node->tri_count == 0)
 IS_INTERNAL_NODE:
-    # ray->ray_depth++
-    lbu r5, r0, 62              #r5 = ray->ray_depth
-    add r5, r5, 1               #r5 = ray->ray_depth + 1
-    sb r5, r0, 62               # ray->ray_depth = ray->ray_depth + 1
+    # AI fix: ray_depth++ moved to TRAVERSE_OWN_CHILD so forwarded rays carry the node's own depth
 
 # RYAN VALIDATED TRHOUGH HERE
 
@@ -584,9 +509,7 @@ IS_INTERNAL_NODE:
     and r7, r7, 0                          # r7 = 0
 
     # if node->node_id != root_node_id AND if node->node_id != 0xFFFFFFFF
-    lhu r6, r1, 34                          # r6 = core_owner
-    srl r9, r9, 16                          # r9 = 0x0000FFFF
-    beq r6, r9, REJECT_PATH, false         # if core_owner == 0x0000FFFF then REJECT_PATH
+    # AI fix: core_owner == 0xFFFF -> REJECT_PATH check moved below SEND_RAY_UP setup
 
 # if core_owner != 0x0000FFFF:
     # uint16_t ray_send_pending_addr = self.ray_send_pending_addr;
@@ -601,16 +524,28 @@ SEND_RAY_UP:
     add r4, r4, -1
     # uint32_t sent = 0;
     and r3, r3, 0                   # r3 = sent = 0
+    # AI fix: unknown owner -> spill to the node's DRAM queue (was checked before this setup, and SEND_RAY_UP sent to core 0xFFFF)
+    lhu r9, r1, 34                  # r9 = node->core_owner
+    or r11, r7, 0xFFFF              # r11 = 0xFFFFFFFF (r7 = 0)
+    srl r11, r11, 16                # r11 = 0x0000FFFF
+    beq r9, r11, REJECT_PATH, false
+    srl r11, r15, 4                 # AI [154] (Alex): r11 = my core id. A stale cached owner equal to this core (copied by a NoC clone
+    beq r9, r11, REJECT_PATH, false #   from its donor) would make the router panic on a self-addressed request: take the DRAM path instead
 
     # disable_interrupts(32)  -- leaf core uses only mailbox 32 for interrupts
     lw r6, r1, 44                  # r6 = node->node_id
+    srl r11, r6, 13                 # AI fix [116] (Alex): a leaf sends to a branch core's mailbox 33 (receiver side), to a leaf's 32.
+    and r11, r11, 1                 #   Imported branch stubs carry node_id + 8192, so bit 13 marks a branch target. Was always 32,
+    add r11, r11, 32                #   so branch cores got every leaf request on 32.
     sll r6, r6, 17
     or r6, r6, r15                # r12 = request_word
     and r3, r3, 0
 
-    # send_packet(request_word, node->core_owner, 32);
+    # send_packet(request_word, node->core_owner, 32 or 33);
     lhu r9, r1, 34                  # r6 = node->core_owner
-    sendflit r6, r9, 32            # TODO confirm notation w/ Alex
+    sll r12, r9, 6                  # AI [116]: core << 6 | pipe (r9 stays the owner for the SENDWAIT dump)
+    or r11, r12, r11
+    sendflit r6, r11
 send_ray_loop:
     switchctx
     # uint32_t msg_available = nb_recv(self.thread_id + 16);
@@ -621,6 +556,8 @@ send_ray_loop:
 
     # uint32_t msg = blocking_receive(self.thread_id + 16);
     block r12, r11                  # r12 = msg
+    srl r13, r12, 31                # AI [113]: a late NoC-clone handshake word (bit 31) in my response mailbox: skip it
+    bne r13, r7, CHECK_DATA_MAILBOX, true
 
     # uint32_t header = msg >> 24;
     srl r13, r12, 24                # r13 = header
@@ -634,7 +571,7 @@ send_ray_loop:
     sll r9, r9, 19
     srl r9, r9, 13    
     and r11, r12, 0xF               # r11 = dest mailbox from ack msg low nibble
-    add r11, r11, 16
+    add r11, r11, 0                 # AI fix: data goes to the 16-deep data mailbox (thread_id), not 16+thread_id (1-deep response mailbox)
     or r9, r9, r11                  # r13 = ray base ptr
 
     lw r7, r0, 0
@@ -657,7 +594,7 @@ send_ray_loop:
     sendflit r7, r9
     lw r7, r0, 36
     sendflit r7, r9
-    lw r7, LEAF_CORE_INDEX_FOR_BRANCH
+    lw r7, r0, 40                   # AI fix: send word 40 as-is (marker | node_id); was LEAF_CORE_INDEX_FOR_BRANCH (positional, mismatched branch DFS order)
     sendflit r7, r9
     lw r7, r0, 44
     sendflit r7, r9
@@ -671,6 +608,7 @@ send_ray_loop:
     sendflit r7, r9
 
 
+    and r7, r7, 0                   # AI fix: r7 held ray word 60 here, so active_ray was not cleared and every later `beq ..., r7` zero test in the send loop misfired
     sb r7, r0, 63                   # ray->active_ray = 0  (r7=0)
     and r3, r3, 0
     add r3, r3, 1                   # r3 = sent = 1
@@ -686,8 +624,10 @@ REJECT_PATH:
 
     add r9, r9, 8
 ENSURE_SPACE_IN_QUEUE:
-    atomadd_d r10, r9, 1               # r10 = cur_ray_count (count field is -12 from here)
     add r11, r7, 255               # r11 = 255
+    lw_d r10, r9, 0                # AI fix: peek the count first (test-and-test-and-set), see branch ENSURE_SPACE_IN_QUEUE
+    bgt r10, r11, ENSURE_SPACE_IN_QUEUE, true
+    atomadd_d r10, r9, 1               # r10 = cur_ray_count (count field is -12 from here)
     blte r10, r11, THERE_EXISTS_SPACE_IN_DRAM_RAY_QUEUE, true   # spin while count > 255
     atomadd_d r15, r9, -1
     beq r15, r15, ENSURE_SPACE_IN_QUEUE, true
@@ -741,12 +681,20 @@ RAY_DRAM_WRITE_LOOP:
     add r9, r9, 20                  # r9 = &lock field (offset 20 from queue base)
 
 ENSURE_NO_WRITERS:
+    lw_d r10, r9, 0                 # AI fix [66]: peek first while a writer holds the lock (see branch ENSURE_NO_WRITERS); r7 = 0 here
+    bgt r7, r10, ENSURE_NO_WRITERS, true
     atomadd_d r10, r9, 1            # r10 = old lock value, increment
-    beq r7, r10, SKIP_UNDO_LOCK, true   # old val >= 0 means no writer held it
+    blte r7, r10, SKIP_UNDO_LOCK, true  # AI fix: proceed if old >= 0 (no writer), like the branch. Was `beq` (old == 0 only), so concurrent readers
+                                        #   kept retrying, and any leaked reader blocked all leaf spills to that queue
     atomadd_d r11, r9, -1           # undo our increment
     beq r15, r15, ENSURE_NO_WRITERS, true        # retry claim
 
 SKIP_UNDO_LOCK:
+    lw r11, r1, 44                  # AI [140] (Alex): an imported branch stub (node_id + 8192, bit 13) points at the branch's receiver
+    srl r11, r11, 13                #   queue, whose header has no owner list (the owners live in the main queue header, 32612 bytes
+    beq r11, r7, OWNER_LIST_OK, true #   below). Reading the receiver header gave owner_count 0 -> NO_OWNER -> core_owner = 0xFFFF on
+    add r9, r9, -32612              #   every push, so a leaf never learned a branch owner and every leaf->branch ray skipped the NoC.
+OWNER_LIST_OK:                      #   r9 is only used to read the owner list below; the lock release reloads the queue address.
     lw_d r10, r9, 4                 # r10 = core_owner_count
     beq r10, r7, NO_OWNER, true     # r7=0, no owners
 
@@ -770,56 +718,52 @@ SKIP_BUMP:
     beq r15, r15, SKIP_EMERGENCY_ENQUEUE, true
 
 NO_OWNER:
-    # node->core_owner = 0xFFFF
     and r11, r11, 0
     add r11, r11, 0xFFFF            # r11 = 0xFFFF
     sh r11, r1, 34                  # node->core_owner = 0xFFFF
-
-    # if (cur_ray_count > 200) -> emergency queue insertion
-    lw r9, r1, 36                   # r9 = queue_low_bit_addr (reload)
-    lw_d r10, r9, 8               # r10 = cur_ray_count
-    and r11, r11, 0
-    add r11, r11, 200               # r11 = 200
-    blte r10, r11, SKIP_EMERGENCY_ENQUEUE, true   # if count <= 200 skip emergency
-
-    # atomic_add(queue_address_low + 16924, 1) to check if first to enqueue
-    add r9, r9, 16924               # r9 = &on_emergency_idle_queue flag
-    atomadd_d r10, r9, 1            # r10 = old value
-    bne r10, r7, SKIP_EMERGENCY_ENQUEUE, true   # r7=0; if old != 0 someone else did it
-
-    # load emergency queue address
-    lw r9, EMERGENCY_QUEUE_HIGH     # r9 = emergency_queue_high
-    setmembits r9                   # set address bits
-    lw r9, EMERGENCY_QUEUE_LOW      # r9 = emergency_queue_low
-    add r9, r9, 8                   # r9 = &count field
-
-LOOP_EMERGENCY_QUEUE_INSERTION:
-    atomadd_d r10, r9, 1            # r10 = old count, increment
-    and r11, r11, 0
-    add r11, r11, 64                # r11 = 64 (max slots)
-    bgt r10, r11, EMERGENCY_UNDO_AND_SPIN, true   # if old >= 64 queue full
-    beq r15, r15, EMERGENCY_CLAIM_SLOT, true
-
-EMERGENCY_UNDO_AND_SPIN:
-    atomadd_d r11, r9, -1           # undo increment
-    beq r15, r15, LOOP_EMERGENCY_QUEUE_INSERTION, true  # retry
-
-EMERGENCY_CLAIM_SLOT:
-    add r9, r9, -4                  # r9 = &tail field
-    atomadd_d r10, r9, 4            # r10 = old tail, advance by 4 bytes per slot
-    and r10, r10, 0xFF              # r10 = tail & 0xFF (ring mask for 64 slots)
-    add r9, r9, r10                 # r9 = &slots[tail]
-    add r9, r9, 8                   # r9 = slot base (skip head+tail fields)
-
-ENSURE_EMERGENCY_SLOT_READY:
-    lbu_d r11, r9, 2                # r11 = slot->is_valid
-    bne r11, r7, ENSURE_EMERGENCY_SLOT_READY, true  # spin while slot occupied (r7=0)
-
-    # write node_id into slot and mark valid
-    lw r11, r1, 44                  # r11 = node->node_id
-    sh_d r11, r9, 0                 # slot->node_id = node_id (uint16)
-    add r11, r7, 1                 # r11 = 1
-    sb_d r11, r9, 2                 # slot->is_valid = 1
+    lw r9, r1, 36                   # AI [95] emergency-queue producer (re-enabled). r9 = queue base (membits are still this queue's)
+    lw_d r10, r9, 24                # owner_count
+    bne r10, r7, SKIP_EMERGENCY_ENQUEUE, true   # owners exist (self-pick fallback): nothing to do
+    lw_d r10, r9, 8                 # rays waiting (count at +8; the branch read -12 = the lock field's -12, wrong after the reload)
+    lw r11, EMERG_MIN_RAYS
+    blte r10, r11, SKIP_EMERGENCY_ENQUEUE, true
+    lw r11, r1, 44                  # AI fix [118]: no emergency for an imported branch stub (node_id + 8192). Its queue address is the
+    srl r11, r11, 13                #   branch's receiver queue, whose header has no owner list (owners live in the main queue header),
+    bne r11, r7, SKIP_EMERGENCY_ENQUEUE, true   #   so owner_count read 0 every time, and q = node_id + 8192 indexed past the template table:
+                                    #   donors booted an all-zero entry (leaf firmware, node 0) and looped forever in FIND_BRANCH_NODE
+                                    #   holding getowner (run 86: 358 frozen cores, run 84 ~470).
+    lw r9, EMERGENCY_QUEUE_HIGH     # stack 0: emergency queue and the per-queue flag table
+    setmembits r9
+    lw r11, r1, 44                  # q = node->node_id (queue index)
+    sll r11, r11, 2
+    lw r12, EMERG_FLAG_LOW
+    add r12, r12, r11               # &flag[q] (was queue+16924, inside the ray slots)
+    atomadd_d r10, r12, 1
+    bne r10, r7, EMERG_DONE, true   # already queued, or a core is on its way
+    lw r9, EMERGENCY_QUEUE_LOW
+    add r9, r9, 8                   # &count
+    atomadd_d r10, r9, 1            # old count
+    add r11, r7, 64
+    bgt r11, r10, EMERG_CLAIM, true
+    atomadd_d r11, r9, -1           # full: undo and clear the flag (was: spin forever holding this queue's reader lock); the next spill retries
+    sw_d r7, r12, 0
+    beq r15, r15, EMERG_DONE, true
+EMERG_CLAIM:
+    add r9, r9, -4                  # &tail
+    atomadd_d r10, r9, 4            # old tail
+    and r10, r10, 0xFF              # 64 slots x 4 bytes
+    add r9, r9, r10
+    add r9, r9, 8                   # slots start at base+12 (was base+8 = the count field)
+EMERG_SLOT_WAIT:
+    lbu_d r11, r9, 2
+    bne r11, r7, EMERG_SLOT_WAIT, true
+    lw r11, r1, 44
+    sh_d r11, r9, 0                 # slot.q
+    add r11, r7, 1
+    sb_d r11, r9, 2                 # slot.valid = 1
+EMERG_DONE:
+    lhu r9, r1, 40                  # restore this queue's membits for the lock release below
+    setmembits r9
 
 SKIP_EMERGENCY_ENQUEUE:
     lw r9, r1, 36                   # r9 = queue_low_bit_addr
@@ -872,12 +816,14 @@ CHECK_DATA_MAILBOX:
     and r4, r4, 0
     add r4, r4, -1
 CHECK_INTERRUPT_MAILBOX:
+    beq r15, r15, SKIP_INTERRUPT_MAILBOX, true   # AI [146] (Alex): a sending context no longer polls 32 (it rejected every request it took).
+                                    #   Context 15 (IRQ_CTX) and yielding workers serve 32/33 through EAT_RAY_INTERRUPT, so two contexts can both send.
     nonblock r11, 32
     beq r11, r7, SKIP_INTERRUPT_MAILBOX, true
     block r11, 32
     srl r12, r11, 17
     lw r6, ROOT_NODE_ID
-    beq r12, r6, CORRECT_NODE_ID, true
+    bne r12, r12, CORRECT_NODE_ID, true     # AI fix: never taken -> always reject while in the send loop (its space check was inverted and accepted rays skipped the word-40 setup)
 SEND_REJECT_RAY_MSG:
     add r12, r7, 8
     sll r12, r12, 24 
@@ -933,28 +879,18 @@ SKIP_INTERRUPT_MAILBOX:
     atomadd r15, r3, -1
     beq r15, r15, ray_done, true
 TRAVERSE_OWN_CHILD:
-    # node = node->left_child
+    and r2, r2, 0                   # AI [SL]: enter the left child from its parent
+    sb r2, r0, 62
     lhu r1, r1, 24                  # r1 = node->left_child
     beq r15, r15, START_SEARCHING, true
 IS_LEAF_NODE:
-    and r7, r7, 0
-    lbu r10, r1, 30
-    sll r10, r10, 2
-    add r10, r10, r0
-    lw r11, r10, 44
-    lbu r12, r0, 62
-    add r13, r7, 1
-    add r12, r12, -1
-    sb  r12, r0, 62
-    sll r13, r13, r12
-    or r11, r13, r11
-    sw r11, r10, 44
+    and r7, r7, 0                   # AI [SL]: (the parent-bit update that was here is gone)
     lhu r2, r1, 32              # r2 - tri_index
     lbu r3, r1, 31              # r3 = tri_count
 TRIANGLE_INTERSECT_LOOP:
     beq r15, r15, triangle_intersect, true
 TRIANGLE_INTERSECT_RETURN:
-    add r2, r2, 6
+    add r2, r2, 12                  # AI fix: index records are 12 bytes (u32 tri id + 3 x u16 vertex offsets + pad); was 6
     lbu r5, r0, 61
     and r4, r4, 0
     lw r6, r0, 56
@@ -967,68 +903,21 @@ SHADOW_RAY_NOT_OCCLUDED:
     add r3, r3, -1
     bne r4, r3, TRIANGLE_INTERSECT_LOOP, true
 
-    and r7, r7, 0            # triangle_intersect clobbers r7; restore for SEND_RAY_UP
-    lhu r10, r1, 28          # r10 = parent
-    and r8, r8, 0
-    add r8, r8, 0xFFFF
-    srl r8, r8, 16           # r8 = 0x0000FFFF
-    beq r10, r8, SEND_RAY_UP, true   # at root: r1 still = leaf node, r7 = 0
-    
-    add r1, r10, 0          #was lhu r1, r1, 28
-    beq r15, r15, START_SEARCHING, true
+    beq r15, r15, SL_ASCEND, true   # AI [SL]: leaf finished: leave it upward (SL_ASCEND restores r7 = 0 for SEND_RAY_UP)
 
 AABB_MISS:
-    lbu r10, r1, 30
-    sll r10, r10, 2
-    add r10, r10, r0
-    lw r11, r10, 44
-    lbu r12, r0, 62
-    add r13, r7, 1
-    add r12, r12, -1
-    sb r12, r0, 62
-    sll r13, r13, r12
-    or r11, r13, r11
-    sw r11, r10, 44
-    lhu r1, r1, 28  
-    beq r15, r15, START_SEARCHING, true
+    beq r15, r15, SL_ASCEND, true    # AI [SL]: was: set the parent's visited bit, depth--, go to the parent
 
 #UNCONDITIONAL BRANCH
 
 #RYAN VALIDATED STARTS
 
 # if (left_bitfield_check | right_bitfield_check) != 0
-TRAVERSE_LEFT_OR_RIGHT:
-    or r10, r10, 0xFFFF             #r10 = 0xFFFFFFFF
-    lbu r12, r0, 62                 #r12 = ray->ray_depth
-    add r12, r12, 1                 #r12 = ray->ray_depth + 1
-    sll r10, r10, r12               #r10 = 0xFFFFFFFF << (ray_depth + 1)
-    xor r10, r10, 0xFFFF            #r10 = ~(0xFFFFFFFF << (ray_depth + 1))
-    lw r9, r0, 44                   #r9 = ray->check_left
-    lw r13, r0, 48                  #r13 = ray->check_right
-    and r9, r9, r10                 #r9 = ray->check_left &  ~(0xFFFFFFFF << (ray_depth + 1))
-    and r13, r13, r10               #r13 = ray->check_right & ~(0xFFFFFFFF << (ray_depth + 1))
-    sw r9, r0, 44                   #ray->check_left = ray->check_left &  ~(0xFFFFFFFF << (ray_depth + 1))
-    sw r13, r0, 48                  #ray->check_right = ray->check_right &  ~(0xFFFFFFFF << (ray_depth + 1))
-    and r12, r12, 0                 #r12 = 0
-    beq r4, r12, SKIP_LEFT_BITFIELD_INCREMENT, false #if left_bitfield_check == 0 then SKIP_LEFT_BITFIELD_INCREMENT
-
-    # if left_bitfield_check == 1
-    add r12, r12, 2                 #r12 = 2
-SKIP_LEFT_BITFIELD_INCREMENT:
-    add r1, r1, r12                 #r1 = &node (+ 2)
-    lhu r1, r1, 24                  #r1 = node = left_child OR right_child  # Go left or right
-    lbu r10, r0, 62                 #r10 = *(&ray + 62) = ray->ray_depth
-    add r10, r10, 1                 #ray_depth += 1
-    sb r10, r0, 62                  # ray->ray_depth = ray->ray_depth + 1
-    beq r15, r15, START_SEARCHING, true
 
 #UNCONDITIONAL BRANCH
 
 SHADOW_RAY_OCCLUDED:
-    lw r10, RAYS_COMPLETED_HIGH     # r10 = rays_completed_high
-    setmembits r10                  # set_address_bits(finished_ray_high);
-    lw r11, RAYS_COMPLETED_LOW      # r11 = rays_completed_low
-    atomadd_d r12, r11, 1           # r11 = rays_completed_low = rays_completed_low + 1
+                                    # AI [127] (Alex): RAYS_COMPLETED++ moved to the end, after the result word is in DRAM
 
     # BIG TODO; Alex explain the math for ray_result_addr stuff
 
@@ -1037,8 +926,8 @@ SHADOW_RAY_OCCLUDED:
     setmembits r10                  # set_address_bits(finished_ray_high);
     # uint32_t result_addr_low = self.ray_result_addr_low;
     lw r11, RAY_RESULT_LOW          # r11 = ray_result_low
-    # atomic_add_dram(result_addr_low, 1); // increment finished ray counter
-    atomadd_d r12, r11, 1           # r12 = old finished ray count, increment
+    # AI [127]: removed `atomadd_d r12, r11, 1` here: it added 1 to the first word of the result buffer (pixel 0, bounce 0,
+    #   red) on every occluded shadow ray; the finished-ray counter is RAYS_COMPLETED.
 
     # uint32_t pix_index = ray->pix_y;
     lhu r13, r0, 54                  # r13 = ray->pix_y
@@ -1066,6 +955,12 @@ SHADOW_RAY_OCCLUDED:
     lw r10, ONE                     # r10 = 0x3F800000
     add r11, r11, 12                # r11 = result_addr_low + 12
     sw_d r10, r11, 0                # store_dram_word(result_addr_low + 12, one)
+    lw_d r10, r11, 0                # AI [127]: read back the result word (returns after the store landed), RAW wait,
+    and r10, r10, 0                 #   then RAYS_COMPLETED++
+    lw r10, RAYS_COMPLETED_HIGH
+    setmembits r10
+    lw r11, RAYS_COMPLETED_LOW
+    atomadd_d r15, r11, 1
 
     # ray->active_ray = 0;
     and r7, r7, 0                   #r7 = 0
@@ -1073,7 +968,7 @@ SHADOW_RAY_OCCLUDED:
 
 #RYAN VALIDATED ENDS
 
-ray_done:
+ray_done:                                # AI [115]: removed `intena 34` here ([102b]): context 15 serves NoC clone requests
     # ; if (ray->active_ray == 1) { goto start_ray_traversal; }
     and r7, r7, 0
     lb r8, r0, 63
@@ -1081,6 +976,20 @@ ray_done:
 
     # yield();
     yield r8
+    and r7, r7, 0  # AI fix: re-zero after yield (EAT_RAY_INTERRUPT may run at any yield and clobbers r4, r6-r14)
+    getclk r9                            # AI [143] (Alex): a ray just left this context (sent or finished): busy = a reject within the
+    lw r10, REJ_LAST_TS                  #   last IDLE_WINDOW and >= 2 rejects in the current streak. Cooldown checked here in SRAM first
+    sub r10, r9, r10                     #   (CLONE_REQUEST starts with a DRAM read), and REJ_CNT is cleared so one streak asks once.
+    lw r11, IDLE_WINDOW
+    blte r11, r10, RD_REJ_DONE, true
+    lw r10, REJ_CNT
+    add r11, r7, 1
+    blte r10, r11, RD_REJ_DONE, true
+    lw r10, CLONE_NEXT_REQ
+    bgt r10, r9, RD_REJ_DONE, true
+    sw r7, REJ_CNT
+    jmp r8, CLONE_REQUEST                # uses r9-r14 and the link (r8) only; r7 stays 0; returns with membits = RAY_QUEUE_HIGH
+RD_REJ_DONE:
 
     # Check local SRAM ray queue
     # uint32_t local_queue_addr = self.local_ray_queue;
@@ -1102,15 +1011,25 @@ ray_done:
 CHECK_SRAM_HEAD:
     # uint32_t head = atomic_add(local_queue_addr, 64);
     and r7, r7, 0
+    add r8, r7, RAY_QUEUE_HEAD   # AI fix: r8 = &RAY_QUEUE_HEAD (was `lw r8, RAY_QUEUE_HEAD`, the head VALUE used as an address -> atomadd on SRAM 0)
     add r7, r7, 64
-    lw r8, RAY_QUEUE_HEAD
     atomadd r10, r8, r7          # r10 = head, advance head by 64 bytes
     and r7, r7, 0
     # head = head & 0x000007FF; // 32 slots * 64 bytes = 1024
-    and r10, r10, 0x7FF          # r10 = head & 0x7FF (ring buffer mask)
+    and r10, r10, 0x3FF          # r10 = head & 0x3FF  AI fix: 16-slot ring to match EAT_RAY_INTERRUPT's insertion mask/capacity (was 0x7FF)
     # uint32_t ray_src = local_queue_addr + 12 + head;
     add r10, r10, 12             # r10 = local_queue_addr + 12 + head (ray slot address)
     add r10, r10, r8
+    add r3, r10, 0                  # AI fix [83]: wait until the intake handler has written the whole slot (byte 63 = 1); r3 survives yields (the leaf handler clobbers r5)
+LOCAL_SLOT_WAIT:
+    lbu r12, r3, 63
+    and r7, r7, 0
+    bne r12, r7, LOCAL_SLOT_OK, true
+    yield r8
+    beq r15, r15, LOCAL_SLOT_WAIT, true
+LOCAL_SLOT_OK:
+    add r10, r3, 0
+    and r7, r7, 0
     # int ray_index = ray;
     add r11, r0, 0
     and r7, r7, 0
@@ -1131,8 +1050,14 @@ RAY_UPDATE_LOOP_DONE:
     and r7, r7, 0
     # *(ray_src - 1) = 0;
     sb r7, r10, -1
+    add r8, r7, RAY_QUEUE_HEAD      # AI fix [124]: only now give the slot back to producers (used--), after the copy
+    add r8, r8, 2072
+    atomadd r8, r8, -1
     # ray->leaf_node_starting_point = self.branch_local_leaf_index;
-    lw r8, BRANCH_LOCAL_LEAF_INDEX # TODO Alex what
+    lw r8, ROOT_NODE_ID             # AI fix: word 40 = 0x80000000 | node_id marks a ray that will return to the parent branch's
+    or r12, r12, 0xFFFF             #   receiver half, which resumes above its treelet. Was BRANCH_LOCAL_LEAF_INDEX (never computed, -1).
+    sll r12, r12, 31
+    or r8, r8, r12
     sw r8, r0, 40
     # ray->active_ray = 1;
     add r7, r7, 1
@@ -1143,11 +1068,10 @@ RAY_UPDATE_LOOP_DONE:
     beq r15, r15, START_RAY_TRAVERSAL, true
 NEGATIVE_RAY_COUNT:
     # uint8_t flushing_queue = *(self.local_queue_flushing);
-    lw r8, LOCAL_QUEUE_FLUSHING # r8 = &local_queue_flushing
-    lbu r8, r8, 0
+    lw r8, LOCAL_QUEUE_FLUSHING # r8 = local_queue_flushing (AI [62]: the value; the old `lbu r8, r8, 0` then read SRAM[value])
     # if (flushing_queue != 0){ goto inf_loop; }
     and r7, r7, 0
-    bne r8, r7, INF_LOOP, true
+    bne r8, r7, FLUSH_PARK, true      # AI [63]: was INF_LOOP (never resumed)
 CHECK_DRAM_QUEUE:
     # yield();
     yield r8
@@ -1167,17 +1091,16 @@ CHECK_DRAM_QUEUE:
 
     #     if (cur_ray_count >= 256) { ... }
     and r7, r7, 0
-    add r7, r7, 256
-    blte r11, r7, DONT_ASK_FOR_HELP, true
+    add r7, r7, 192                 # AI [55]: was 256 (see branch)
+    blte r11, r7, CHECK_CUR_RAY_COUNT, true   # AI [56]: below the threshold just pull (was: reset the streak at DONT_ASK_FOR_HELP)
     # uint32_t num_times_pulled_from_full_queue = atomic_add(pulled_from_full_queue_address, 1);
     and r9, r9, 0
     add r9, r9, PULLED_FROM_FULL_QUEUE_CNT
     atomadd r9, r9, 1           # r9 = old count, increment
     # if (num_times_pulled_from_full_queue > BRANCH_BUSY_THRESHOLD)
-    and r7, r7, 0
-    add r7, r7, 200
-    blte r9, r7, CHECK_CUR_RAY_COUNT, true
-    jmp r15, SEARCH_FOR_IDLE_CORES 
+    lw r7, CLONE_BUSY_PULLS         # AI [53]: busy threshold (was -1 = disabled)
+    blteu r9, r7, CHECK_CUR_RAY_COUNT, true  # AI: unsigned compare so the 0xFFFFFFFF threshold is never exceeded
+    jmp r8, CLONE_REQUEST           # AI [53]: was `jmp r15, SEARCH_FOR_IDLE_CORES` (no link). Returns to DONT_ASK_FOR_HELP.
 DONT_ASK_FOR_HELP:
     # *(self->pulled_from_full_queue_address) = 0;
     and r7, r7, 0
@@ -1243,89 +1166,101 @@ WRITE_TO_RAY_IDX_LOOP:
     beq r15, r15, WRITE_TO_RAY_IDX_LOOP, true
 WRITE_TO_RAY_IDX_LOOP_DONE:
     lw r1, ROOT_NODE_ADDRESS
+    and r7, r7, 0           # AI fix: r7 was 16 (loop counter), so the slot's ready byte was set to 16 instead of cleared
     # write_dram_byte(queue_address_low - 1, 0); // mark consumed
     add r9, r9, -1          # r9 = queue_address_low - 1
     sb_d r7, r9, 0           # write 0 to ready byte to mark consumed
     add r9, r9, 1           # restore r9 to point to start of ray slot
     # ray->leaf_node_starting_point = self.branch_local_leaf_index;
-    lw r8, BRANCH_LOCAL_LEAF_INDEX
+    lw r8, ROOT_NODE_ID             # AI fix: word 40 = 0x80000000 | node_id marks a ray that will return to the parent branch's
+    or r12, r12, 0xFFFF             #   receiver half, which resumes above its treelet. Was BRANCH_LOCAL_LEAF_INDEX (never computed, -1).
+    sll r12, r12, 31
+    or r8, r8, r12
     sw r8, r0, 40          # ray->leaf_node_starting_point = branch_local_leaf_index
     # goto start_ray_traversal;   
     beq r15, r15, START_RAY_TRAVERSAL, true 
 NO_DRAM_RAYS:
+    beq r15, r15, CHECK_DONE, true  # AI [95]: original in-place emergency switch disabled (count +1 never undone, no drain or owner-list
+                                    #   handoff). Emergency entries are taken by idle cores through the clone-reboot path (CLONE_POLL_REQUEST).
     # uint32_t emergency_queue_high = self.emergency_queue_high;
-    lw r10, EMERGENCY_QUEUE_HIGH # r10 = emergency_queue_high
-    # set_address_bits(emergency_queue_high);
-    setmembits r10
-    # uint32_t emergency_queue_low = self.emergency_queue_low;
-    lw r9, EMERGENCY_QUEUE_LOW # r9 = emergency_queue_low
-    # uint32_t count = load_dram_word(emergency_queue_low + 8);
-    add r9, r9, 8           # r9 = &count field
-    lw_d r11, r9, 0       # r11 = count
-    add r9, r9, -8
-    # if (count <= 0)
-    # {
-    #     goto check_done;
-    # }
-    and r7, r7, 0
-    blte r11, r7, CHECK_DONE, true
-    # emergency_queue_low += 8;
-    add r9, r9, 8
-    # uint32_t old_cnt = atomic_add_dram(emergency_queue_low, 1);
-    atomadd_d r11, r9, 1       # r11 = old_cnt, increment count
-    # if (old_cnt <= 0)
-    # {
-    #     atomic_add_dram(emergency_queue_low, -1);
-    #     goto check_done;
-    # }
-    and r7, r7, 0
-    bgt r11, r7, EMERGANCY_QUEUE_CONTINUE, true
-    atomadd_d r11, r9, -1      # undo increment
-    beq r15, r15, CHECK_DONE, true
-EMERGANCY_QUEUE_CONTINUE:
-    # emergency_queue_low -= 8;
-    add r9, r9, -8
-    # uint32_t byte_index = atomic_add_dram(emergency_queue_low, 4);
-    atomadd_d r10, r9, 4 
-    # byte_index &= 0x000000FF;
-    and r10, r10, 0xFF
-    # emergency_queue_low += byte_index;
-    add r9, r9, r10
-    # emergency_queue_low += 12;
-    add r9, r9, 12
-    # ensure_emergency_slot_ready:
-ENSURE_EMERGENCY_SLOT_READY_TWO:
-    # uint16_t is_ready = load_dram_byte(emergency_queue_low + 2);
-    add r10, r9, 2           # r10 = emergency_queue_low + 2
-    lbu_d r10, r10, 0          # r10 = is_ready
-    # if (is_ready == 1)
-    # {
-    #     goto ensure_emergency_slot_ready_TWO;
-    # }
-    and r7, r7, 0
-    add r7, r7, 1
-    beq r10, r7, ENSURE_EMERGENCY_SLOT_READY_TWO, true
-    # uint32_t new_node_id = load_dram_half(emergency_queue_low);
-    lw_d r11, r9, 0           # r11 = new_node_id (uint32 loaded from slot)
-    # store_dram_byte(emergency_queue_low + 2, 0);
-    add r10, r9, 2           # r10 = emergency_queue_low + 2
-    and r7, r7, 0
-    sb_d r7, r10, 0          # mark slot as empty by writing 0 to is_ready
-    # goto switch_dram_queue;
-    #TODO
-    beq r15, r15, SWITCH_DRAM_QUEUE, true
+#AI[100]     lw r10, EMERGENCY_QUEUE_HIGH # r10 = emergency_queue_high
+#AI[100]     # set_address_bits(emergency_queue_high);
+#AI[100]     setmembits r10
+#AI[100]     # uint32_t emergency_queue_low = self.emergency_queue_low;
+#AI[100]     lw r9, EMERGENCY_QUEUE_LOW # r9 = emergency_queue_low
+#AI[100]     # uint32_t count = load_dram_word(emergency_queue_low + 8);
+#AI[100]     add r9, r9, 8           # r9 = &count field
+#AI[100]     lw_d r11, r9, 0       # r11 = count
+#AI[100]     add r9, r9, -8
+#AI[100]     # if (count <= 0)
+#AI[100]     # {
+#AI[100]     #     goto check_done;
+#AI[100]     # }
+#AI[100]     and r7, r7, 0
+#AI[100]     blte r11, r7, CHECK_DONE, true
+#AI[100]     # emergency_queue_low += 8;
+#AI[100]     add r9, r9, 8
+#AI[100]     # uint32_t old_cnt = atomic_add_dram(emergency_queue_low, 1);
+#AI[100]     atomadd_d r11, r9, 1       # r11 = old_cnt, increment count
+#AI[100]     # if (old_cnt <= 0)
+#AI[100]     # {
+#AI[100]     #     atomic_add_dram(emergency_queue_low, -1);
+#AI[100]     #     goto check_done;
+#AI[100]     # }
+#AI[100]     and r7, r7, 0
+#AI[100]     bgt r11, r7, EMERGANCY_QUEUE_CONTINUE, true
+#AI[100]     atomadd_d r11, r9, -1      # undo increment
+#AI[100]     beq r15, r15, CHECK_DONE, true
+#AI[100] EMERGANCY_QUEUE_CONTINUE:
+#AI[100]     # emergency_queue_low -= 8;
+#AI[100]     add r9, r9, -8
+#AI[100]     # uint32_t byte_index = atomic_add_dram(emergency_queue_low, 4);
+#AI[100]     atomadd_d r10, r9, 4 
+#AI[100]     # byte_index &= 0x000000FF;
+#AI[100]     and r10, r10, 0xFF
+#AI[100]     # emergency_queue_low += byte_index;
+#AI[100]     add r9, r9, r10
+#AI[100]     # emergency_queue_low += 12;
+#AI[100]     add r9, r9, 12
+#AI[100]     # ensure_emergency_slot_ready:
+#AI[100] ENSURE_EMERGENCY_SLOT_READY_TWO:
+#AI[100]     # uint16_t is_ready = load_dram_byte(emergency_queue_low + 2);
+#AI[100]     add r10, r9, 2           # r10 = emergency_queue_low + 2
+#AI[100]     lbu_d r10, r10, 0          # r10 = is_ready
+#AI[100]     # if (is_ready == 1)
+#AI[100]     # {
+#AI[100]     #     goto ensure_emergency_slot_ready_TWO;
+#AI[100]     # }
+#AI[100]     and r7, r7, 0
+#AI[100]     add r7, r7, 1
+#AI[100]     beq r10, r7, ENSURE_EMERGENCY_SLOT_READY_TWO, true
+#AI[100]     # uint32_t new_node_id = load_dram_half(emergency_queue_low);
+#AI[100]     lw_d r11, r9, 0           # r11 = new_node_id (uint32 loaded from slot)
+#AI[100]     # store_dram_byte(emergency_queue_low + 2, 0);
+#AI[100]     add r10, r9, 2           # r10 = emergency_queue_low + 2
+#AI[100]     and r7, r7, 0
+#AI[100]     sb_d r7, r10, 0          # mark slot as empty by writing 0 to is_ready
+#AI[100]     # goto switch_dram_queue;
+#AI[100]     #TODO
+#AI[100]     beq r15, r15, SWITCH_DRAM_QUEUE, true
 
     # yield();
     yield r8
 CHECK_DONE:
     # is_idle_leaf();
-    jmp r2, is_idle_leaf# r2 is return address @ ALEX LOOK AT THIS
+    jmp r2, CLONE_IDLE_HOOK              # AI [53]: was is_idle_leaf (threshold test inverted, ray counter never incremented)
     yield r8                             # yield()
+    and r2, r2, 0                        # AI [135] (Alex): poll RAYS_COMPLETED only on every 64th idle pass of this core
+    add r2, r2, DONE_POLL_CNT            #   (all contexts share the count). The poll was ~62 requests/cycle into stack 0 in run 103.
+    atomadd r3, r2, 1
+    and r3, r3, 63
+    and r2, r2, 0
+    bne r3, r2, ray_done, true
     lw r2, RAYS_COMPLETED_HIGH           # uint32_t finished_ray_high = self.ray_result_addr_high  -- differs: pseudocode uses ray_result_addr, asm uses RAYS_COMPLETED
     setmembits r2                        # set_address_bits(finished_ray_high)
     lw r2, RAYS_COMPLETED_LOW            # uint32_t finished_ray_low = self.ray_result_addr_low
     lw_d r2, r2, 0                       # uint32_t rays_finished = load_dram_word(finished_ray_low)
-    lw r3, MAX_RAYS                      # uint32_t max_rays = 1440 * 2560 * 4
+    lw r3, MAX_RAYS                      # uint32_t max_rays = 2560 * 1440 * 16 = 58,982,400 (AI [126]: comment was "* 4")
     bne r2, r3, ray_done, true           # if (rays_finished != max_rays) goto ray_done
     yield r8                             # yield()
 
@@ -1333,7 +1268,7 @@ CHECK_DONE:
     getowner                             # get_thread_ownership()
     setctx 14                            # set_ctx(14)  -- differs: pseudocode uses 15
     relinquish true                         # relinquish_ownership(1)
-    yield r15                            # yield()
+    yield r8                             # yield()
     lw r0, RAY_RESULT_HIGH           # uint32_t pixel_addr_high = self.ray_result_addr_high
     setmembits r0                        # set_address_bits(pixel_addr_high)
     lw r0, RAY_RESULT_LOW            # uint32_t pixel_addr_low = self.ray_result_addr_low
@@ -1473,42 +1408,454 @@ BOUNCE_DONE: //Label not used lol
     atomadd_d r13, r13, 1               # atomic_add_dram(finished_pixel_low, 1)
     bgt r14, r1, LOOP_PIXEL, true        # if (pix_loop_counter < 30) goto loop_pixel
 
+FLUSH_PARK:                              # AI [63]: park while LOCAL_QUEUE_FLUSHING is set, then go back to the main loop
+    yield r8
+    lw r8, LOCAL_QUEUE_FLUSHING
+    and r7, r7, 0
+    bne r8, r7, FLUSH_PARK, true
+    beq r15, r15, ray_done, true
 INF_LOOP:
     yield r8                            # yield()
     beq r15, r15, INF_LOOP, true         # goto inf_loop
 
 
-is_idle_leaf:
-    getclk r3                               # r3 = current_cycle = get_cycle_count()
-    lw r4, LAST_OBSERVED_CYCLE              # r4 = self.last_observed_cycle
-    sub r3, r3, r4                          # r3 = time_diff = current_cycle - last_observed_cycle
-    and r14, r14, 0                         # r14 = 0 (zero register)
-    lw r5, IDLE_WINDOW                      # r5 = IDLE_WINDOW (minimum time between idle checks)
-    bgt r3, r5, PASSED_BRANCH_WINDOW, false # if time_diff <= IDLE_WINDOW goto return (too soon)
-    jmp r15, r2                             # return 0 (not enough time has passed)
-PASSED_BRANCH_WINDOW:
-    lw r4, PREVIOUSLY_IDLE                  # r4 = self.previously_idle
-    beq r4, r14, NOT_PREVIOUSLY_IDLE, false # if previously_idle == 0 goto NOT_PREVIOUSLY_IDLE
-    jmp r15, r2                             # return 0 (already marked idle, nothing to do)
-NOT_PREVIOUSLY_IDLE:
-    getclk r5                               # r5 = current_cycle (fresh timestamp)
-    sw r5, LAST_OBSERVED_CYCLE              # self.last_observed_cycle = current_cycle
-    lw r5, RAYS_PROCESSED                   # r5 = self.rays_processed
-    sw r14, RAYS_PROCESSED                  # self.rays_processed = 0 (reset counter)
-    sll r5, r5, 16                          # r5 = rays_processed << 16 (fixed-point scale for division)
-    div r5, r5, r3                          # r5 = ratio = (rays_processed << 16) / time_diff
-    lw r4, BRANCH_IDLE_THRESHOLD            # r4 = BRANCH_IDLE_THRESHOLD
-    blte r4, r5, ONLY_ENQUEUE_ONCE_IDLE_QUEUE, false # if ratio >= threshold goto ONLY_ENQUEUE_ONCE_IDLE_QUEUE (busy enough)
-    jmp r15, r2                             # return 0 (not idle enough to enqueue)
-ONLY_ENQUEUE_ONCE_IDLE_QUEUE:
-    add r6, r2, 0
-    jmp r2, ADD_IDLE_CORE
-    and r3, r3, 0
-    add r3, r3, PREVIOUSLY_IDLE
-    atomadd r3, r3, 1    
-    and r14, r14, 0                         # r14 = 0 (zero register)
-    add r14, r14, 1
-    jmp r15, r6                             # return 0 (already marked idle, nothing to do)
+# ---------------------------------------------------------------------------------------------
+# AI [53] CORE CLONING (static-copy donation). See AI_AUTOMATED_CHANGES.txt [53] for the protocol.
+# CLONE_IDLE_HOOK: called from the idle path with link r2. Context 0 only. Returns with r14 = 0.
+#   Clobbers r3-r13 and membits.
+# ---------------------------------------------------------------------------------------------
+CLONE_IDLE_HOOK:
+    and r14, r14, 0
+    and r3, r15, 0xF
+    bne r3, r14, CLONE_HOOK_RET2, true   # context 0 only. AI fix [121]: was CLONE_HOOK_RET, whose [97] give-back let every idle context
+                                         #   hand back context 0's emergency claim (CLONE_EMERG) while context 0 was draining for it; the
+                                         #   donation then reloaded REASSIGN = 0 and CLONE_EMERG = 0, so r5 = -1 = emergency q 0xFFFF,
+                                         #   booted the all-zero template and froze in FIND_BRANCH_NODE (run 90: 1211 cores).
+    lw r3, PREVIOUSLY_IDLE
+    bne r3, r14, CLONE_POLL_REQUEST, false   # already in the idle pool: look for a request
+    getclk r3                            # AI [84]: no idle registration during warm-up. Before rays reach the deep leaves every core
+    lw r4, CLONE_WARMUP                  #   looks idle, so hot leaf nodes donated almost all their cores to the root
+    blte r3, r4, CLONE_HOOK_RET, true    #   (run 50: node 4 down to 1 owner with a full queue, node 5 to 13 of 94).
+    getclk r3
+    lw r4, LAST_OBSERVED_CYCLE
+    sub r3, r3, r4                       # cycles since the last idle check
+    lw r5, IDLE_WINDOW
+    blte r3, r5, CLONE_HOOK_RET, true    # check at most once per IDLE_WINDOW
+    getclk r4
+    sw r4, LAST_OBSERVED_CYCLE
+    lw r4, CLONE_WARMUP_DONE             # AI [136b]: set once reached on this core: skip the DRAM read from then on
+    bne r4, r14, CLONE_WARMUP_PASSED, true   # AI [136c]: a flag in the not-downloaded area (0 at power-up; a clone reboot keeps it)
+    lw r3, RAYS_COMPLETED_HIGH           # AI [136]: warm-up counted in work, not cycles. With the memory model the boot takes ~750K
+    setmembits r3                        #   cycles, so the 400K-cycle CLONE_WARMUP ended before any ray existed and nearly every leaf
+    lw r3, RAYS_COMPLETED_LOW            #   registered idle; hot leaf nodes were donated away (run 103: node 4 89 -> 29 owners).
+    lw_d r3, r3, 0                       #   No idle registration until CLONE_WARMUP_RAYS rays have completed (checked once per IDLE_WINDOW).
+    lw r4, RAY_QUEUE_HIGH
+    setmembits r4                        # leave membits as the scan path below does
+    add r4, r14, 1000                    # AI [136c]: CLONE_WARMUP_RAYS as an immediate: data below the DO-NOT-INCLUDE line is never
+    bgt r4, r3, CLONE_HOOK_RET, true     #   downloaded, so the .data 1000 read as 0 and the gate never held (run 105)
+    add r4, r14, 1
+    sw r4, CLONE_WARMUP_DONE             # AI [136b]: reached: never poll again
+CLONE_WARMUP_PASSED:
+    # AI [59]: idle = no context holds an active ray AND my DRAM queue is empty, at CLONE_IDLE_MAX_RAYS consecutive
+    #   checks (one per IDLE_WINDOW). Counting rays started (the [53] test) marked busy leaves idle: one leaf ray can
+    #   occupy a context for tens of thousands of cycles.
+    and r6, r6, 0
+    add r6, r6, RAY_ARRAY
+    add r8, r14, 16
+CLONE_IDLE_SCAN:
+    lbu r7, r6, 63
+    bne r7, r14, CLONE_NOT_IDLE, false   # a context holds a ray: busy
+    add r6, r6, 64
+    add r8, r8, -1
+    bne r8, r14, CLONE_IDLE_SCAN, true
+    lw r3, RAY_QUEUE_HIGH
+    setmembits r3
+    lw r3, RAY_QUEUE_LOW
+    lw_d r4, r3, 8                       # my DRAM queue count
+    bgt r4, r14, CLONE_NOT_IDLE, false   # work waiting: busy
+    lw r5, CLONE_IDLE_STREAK
+    add r5, r5, 1
+    sw r5, CLONE_IDLE_STREAK
+    lw r4, CLONE_IDLE_MAX_RAYS           # (now: consecutive idle checks required)
+    bgt r4, r5, CLONE_HOOK_RET, true     # not idle long enough yet
+                                         # AI [95]: sole-owner check removed: a leaf may go to zero owners (emergency queue refills it)
+    add r3, r14, 1
+    sw r3, PREVIOUSLY_IDLE               # register once
+    lw r3, IDLE_QUEUE_HIGH
+    setmembits r3
+    lw r4, IDLE_QUEUE_LOW                # idle pool: head(0) tail(4) count(8), slots {u16 core, u16 valid} from +20
+    add r5, r4, 4
+    atomadd_d r6, r5, 4                  # old tail
+    and r6, r6, 0x7FFF
+    add r6, r6, r4
+    add r6, r6, 20                       # my slot
+CLONE_ENQ_WAIT:
+    lhu_d r7, r6, 2
+    bne r7, r14, CLONE_ENQ_WAIT, false   # wait until the slot is free
+    srl r7, r15, 4
+    sh_d r7, r6, 0                       # slot.core = me
+    add r7, r14, 1
+    sh_d r7, r6, 2                       # slot.valid = 1
+    add r5, r4, 8
+    atomadd_d r7, r5, 1                  # count++ (published after the slot is written)
+    beq r15, r15, CLONE_HOOK_RET, true
+CLONE_POLL_REQUEST:
+    lw r3, IDLE_QUEUE_HIGH
+    setmembits r3
+    lw r4, CLONE_REQ_TABLE_LOW
+    srl r5, r15, 4
+    sll r5, r5, 2
+    add r4, r4, r5                       # &REASSIGN[me]
+    lw_d r5, r4, 0
+    bne r5, r14, CLONE_HAVE_TARGET, false
+    lw r5, CLONE_EMERG                   # AI [95]: emergency node claimed earlier (drain gave up): retry it
+    bne r5, r14, CLONE_HAVE_TARGET, false
+    jmp r13, EMERG_CLAIM_TRY             # r5 = (0x80000000 | q) + 1, or 0
+    beq r5, r14, CLONE_HOOK_RET, true    # no request and no ownerless node
+    sw r5, CLONE_EMERG
+CLONE_HAVE_TARGET:
+    and r9, r9, 0                        # r9 = 0: core not stopped yet
+    jmp r13, CLONE_SAFE_CHECK            # quick check before draining
+    add r3, r14, 1                       # AI [63]: drain first. With LOCAL_QUEUE_FLUSHING set the intake handler rejects new rays
+    sw r3, LOCAL_QUEUE_FLUSHING          #   and idle contexts park in FLUSH_PARK; in-flight rays finish normally.
+    getclk r3                            # AI [145]: r3 = drain start cycle (r2, r3, r5 survive yields; r4, r6-r14 do not)
+CLONE_DRAIN_WAIT:
+    yield r8
+    and r14, r14, 0
+    getclk r4                            # AI [145] (Alex): drain timeout back (removed in [98] on "the drain always finishes"). It does not
+    sub r4, r4, r3                       #   when a context holds a ray it cannot push (target DRAM queue full: ENSURE_SPACE_IN_QUEUE forever):
+    lw r6, IDLE_WINDOW                   #   run 111 ended with ~24% of leaf contexts parked in FLUSH_PARK on frozen donors. After IDLE_WINDOW
+    blte r6, r4, CLONE_DRAIN_GIVEUP, false #   (50K) cycles: clear LOCAL_QUEUE_FLUSHING and resume (the request is kept for a later try).
+    jmp r13, CLONE_QUIET_CHECK           # r6 = 0 once no context holds a ray and the local queue is empty
+    bne r6, r14, CLONE_DRAIN_WAIT, true
+    getowner                             # quick now: the other contexts sit in yield loops
+    add r9, r14, 1                       # r9 = 1: we own the core
+    jmp r13, CLONE_SAFE_CHECK            # recheck with the core stopped
+    lw r3, IDLE_QUEUE_HIGH
+    setmembits r3
+    lw r4, CLONE_REQ_TABLE_LOW           # AI [63]: recompute &REASSIGN[me] (r4 was clobbered by the yields)
+    srl r6, r15, 4
+    sll r6, r6, 2
+    add r4, r4, r6
+    lw_d r5, r4, 0                       # AI fix [89]: reload the request (requester + 1). r5 does not survive the drain-loop yields on
+                                         #   the leaf: EAT_RAY_INTERRUPT saves the flit in r5, so the donor copied the boot entry of a garbage
+                                         #   core id and rebooted with a garbage node index (the clones stuck forever in FIND_BRANCH_NODE).
+    sw_d r14, r4, 0                      # consume the request
+    lw r6, CLONE_EMERG                   # AI [95]: an emergency target takes priority over a pool request
+    beq r6, r14, CLONE_REQ_TARGET, true
+    add r5, r6, 0
+CLONE_REQ_TARGET:
+    bne r5, r14, CLONE_REQ_HAVE, true    # AI fix [121]: no target left (r9 = 1: we own the core): abort instead of booting garbage,
+    sw r14, PREVIOUSLY_IDLE              #   and leave the idle pool flag clear so the core can register again (its pool slot was taken)
+    beq r15, r15, CLONE_BUSY_ABORT, true
+CLONE_REQ_HAVE:
+    add r5, r5, -1                       # r5 = requester core id, or 0x80000000 | q
+    lw r3, RAY_QUEUE_HIGH                # leave my old node's owner list (same writer lock as initialize_core)
+    setmembits r3
+    lw r3, RAY_QUEUE_LOW
+    add r4, r3, 12
+    atomadd_d r6, r4, 1                  # my ticket
+CLONE_TICKET_WAIT:
+    lw_d r7, r3, 16
+    bne r7, r6, CLONE_TICKET_WAIT, true
+    add r4, r3, 20
+    add r7, r14, -8192
+    atomadd_d r8, r4, r7                 # writer: lock -= 8192
+CLONE_WRITER_WAIT:
+    lw_d r8, r4, 0
+    bne r8, r7, CLONE_WRITER_WAIT, true  # wait for readers to drain
+    lw_d r9, r3, 24                      # owner_count
+    lw r12, CLONE_MIN_OWNERS             # AI fix [72]: never leave a node with fewer owners than this (checked under the writer lock;
+    blte r9, r12, CLONE_LAST_OWNER, false #   the registration-time check races when many owners of one node donate at once)
+    add r12, r14, 1                      # AI [95]: the last owner leaves only with an empty DRAM queue. Checked under the writer lock;
+    bne r9, r12, CLONE_NOT_LAST, true    #   senders push before taking the reader lock, so any later ray sees 0 owners -> emergency queue.
+    lw_d r12, r3, 8
+    bne r12, r14, CLONE_LAST_OWNER, false
+CLONE_NOT_LAST:
+    add r10, r3, 28                      # core_slots
+    srl r11, r15, 4
+                                         # AI [125] (Alex): O(1) leave fast path enabled (was commented out in [100]):
+#Alex's O(1) fast path: the core_slots list must stay packed for random owner picks, so a leave swaps the last
+#   entry into the leaver's slot and the moved core's position changes. Each core caches where it THINKS it is (CLONE_MY_SLOT,
+#   written at registration) and checks that one slot with a single DRAM read; on a miss (stale after someone else's swap, or never
+#   set for cores placed at startup) it falls back to the linear search below. CLONE_FOUND_SLOT expects r13 = &core_slots[i].
+     lw r12, CLONE_MY_SLOT                # cached index (0xFFFF = unknown)
+     blte r9, r12, CLONE_O1_MISS, true    # index >= owner_count: cannot be valid
+     sll r13, r12, 1
+     add r13, r13, r10
+     lhu_d r8, r13, 0
+     beq r8, r11, CLONE_FOUND_SLOT, true  # hit: O(1)
+CLONE_O1_MISS:
+    and r12, r12, 0
+CLONE_FIND_SLOT:
+    beq r12, r9, CLONE_SLOT_DONE, false
+    sll r13, r12, 1
+    add r13, r13, r10
+    lhu_d r8, r13, 0
+    beq r8, r11, CLONE_FOUND_SLOT, false
+    add r12, r12, 1
+    beq r15, r15, CLONE_FIND_SLOT, true
+CLONE_FOUND_SLOT:
+    add r12, r9, -1
+    sll r12, r12, 1
+    add r12, r12, r10                    # last slot
+    lhu_d r8, r12, 0
+    sh_d r8, r13, 0                      # slots[i] = last
+    sh_d r14, r12, 0
+    add r12, r3, 24
+    atomadd_d r8, r12, -1                # owner_count--
+    beq r15, r15, CLONE_SLOT_DONE, true
+CLONE_LAST_OWNER:                        # AI fix [72]: abort the donation: release the lock, resume, and allow re-registering later
+    add r12, r3, 20
+    atomadd_d r8, r12, 8192              # release the writer lock
+    add r12, r3, 16
+    atomadd_d r8, r12, 1                 # now_serving++
+    and r14, r14, 0
+    sw r14, PREVIOUSLY_IDLE
+    sw r14, LOCAL_QUEUE_FLUSHING
+    setctx 16                            # undo the getowner
+    relinquish false
+    beq r15, r15, CLONE_HOOK_RET, true
+CLONE_SLOT_DONE:
+    add r12, r3, 20
+    atomadd_d r8, r12, 8192              # release the writer lock
+    add r12, r3, 16
+    atomadd_d r8, r12, 1                 # now_serving++
+    lw r3, EMERGENCY_QUEUE_HIGH          # stack 0: boot table (20000 + core*8) and the emergency template table
+    setmembits r3
+    sw r14, CLONE_EMERG
+    srl r6, r5, 31
+    beq r6, r14, CLONE_COPY_CORE, true
+    and r5, r5, 0xFFFF                   # AI [95]: emergency target: copy the node's boot template (main.rs, + q*8)
+    sll r5, r5, 3
+    lw r6, EMERG_TEMPLATE_LOW
+    add r5, r5, r6
+    beq r15, r15, CLONE_COPY_LOAD, true
+CLONE_COPY_CORE:
+    srl r8, r15, 4                       # AI [102]: CLONE_SRC[me] = requester + 1: my boot asks it for its geometry over the NoC
+    sll r8, r8, 2
+    lw r9, CLONE_SRC_LOW
+    add r8, r8, r9
+    add r9, r5, 1
+    sw_d r9, r8, 0
+    sll r5, r5, 3
+    add r5, r5, 20000
+CLONE_COPY_LOAD:
+    lw_d r6, r5, 0                       # node_id (queue index)
+    lw_d r7, r5, 4                       # is_branch | index
+    add r9, r14, 1                       # AI [61]: mark the copied entry as a clone reboot (bit 30)
+    sll r9, r9, 30
+    or r7, r7, r9
+    srl r8, r15, 4
+    sll r8, r8, 3
+    add r8, r8, 20000
+    sw_d r6, r8, 0
+    sw_d r7, r8, 4                       # I am now a copy of the requester's node
+    intdis 32
+    intdis 33
+    intdis 34
+    intdis 35
+    intdis 36
+    and r0, r0, 0                        # AI [58]: the bootloader's `and r0; setmembits r0` back-to-back reads a stale r0 (no forwarding
+                                         #   into setmembits), so r0 must already be 0 when we jump there
+    beq r15, r15, 0, true                # reboot through the bootloader (context 0 owns the core, all others parked)
+CLONE_SAFE_CHECK:                        # link r13. Returns only if no ray is held anywhere on this core.
+    and r6, r6, 0
+    add r6, r6, RAY_ARRAY
+    add r8, r14, 16
+CLONE_SLOT_LOOP:
+    lbu r7, r6, 63
+    bne r7, r14, CLONE_BUSY_ABORT, false # some context holds an active ray
+    add r6, r6, 64
+    add r8, r8, -1
+    bne r8, r14, CLONE_SLOT_LOOP, true
+    lw r7, RAY_QUEUE_CNT                 # leaf local SRAM ray queue count
+    bne r7, r14, CLONE_BUSY_ABORT_RET, false
+    jmp r15, r13
+EMERG_CLAIM_TRY:                         # AI [95]: link r13. r5 = (0x80000000 | q) + 1 for a claimed emergency entry, else 0. Uses r5-r8.
+    and r5, r5, 0
+    lw r6, EMERGENCY_QUEUE_HIGH
+    setmembits r6
+    lw r6, EMERGENCY_QUEUE_LOW
+    lw_d r7, r6, 8                       # peek count
+    blte r7, r14, EMERG_TRY_RET, true
+    add r8, r6, 8
+    atomadd_d r7, r8, -1                 # old count
+    bgt r7, r14, EMERG_TRY_TAKE, true
+    atomadd_d r7, r8, 1                  # lost the race: undo
+    beq r15, r15, EMERG_TRY_RET, true
+EMERG_TRY_TAKE:
+    atomadd_d r7, r6, 4                  # old head
+    and r7, r7, 0xFF
+    add r7, r7, r6
+    add r7, r7, 12                       # slot
+EMERG_TRY_WAIT:
+    lbu_d r8, r7, 2
+    beq r8, r14, EMERG_TRY_WAIT, false   # producer still writing the slot
+    lhu_d r5, r7, 0                      # q
+    sb_d r14, r7, 2                      # free the slot
+    add r6, r14, 1
+    sll r6, r6, 31
+    or r5, r5, r6
+    add r5, r5, 1
+EMERG_TRY_RET:
+    jmp r15, r13
+CLONE_NOT_IDLE:
+    sw r14, CLONE_IDLE_STREAK            # AI [59]: busy at this check: restart the streak
+    beq r15, r15, CLONE_HOOK_RET, true
+CLONE_BUSY_ABORT_RET:
+CLONE_DRAIN_GIVEUP:                      # AI [63]: could not drain in time: resume, keep the request for a later try
+    and r14, r14, 0
+    sw r14, LOCAL_QUEUE_FLUSHING
+    beq r15, r15, CLONE_HOOK_RET, true
+CLONE_QUIET_CHECK:                       # AI [63]: link r13. r6 = 0 if no context holds a ray and the local queue is empty, else 1
+    and r6, r6, 0
+    add r6, r6, RAY_ARRAY
+    add r8, r14, 16
+CLONE_QUIET_LOOP:
+    lbu r7, r6, 63
+    bne r7, r14, CLONE_QUIET_BUSY, false
+    add r6, r6, 64
+    add r8, r8, -1
+    bne r8, r14, CLONE_QUIET_LOOP, true
+    lw r7, RAY_QUEUE_CNT
+    bne r7, r14, CLONE_QUIET_BUSY, false
+    and r6, r6, 0
+    jmp r15, r13
+CLONE_QUIET_BUSY:
+    add r6, r14, 1
+    jmp r15, r13
+CLONE_BUSY_ABORT:
+    beq r9, r14, CLONE_HOOK_RET, true    # not stopped yet: just return
+    sw r14, LOCAL_QUEUE_FLUSHING         # AI [63]: end the drain
+    setctx 16                            # undo the getowner: make every context runnable again
+    relinquish false
+CLONE_HOOK_RET:
+    and r14, r14, 0
+    lw r5, CLONE_EMERG                   # AI fix [97]: a donation that did not happen gives its emergency target back. Run 67: claimants that
+    beq r5, r14, CLONE_HOOK_RET2, true   #   could not drain (busy again) kept the claim forever; ~250 nodes stayed flagged, never re-queued,
+    sw r14, CLONE_EMERG                  #   and their rays sat in ownerless queues (throughput collapsed after ~1.65M).
+    lw r6, EMERGENCY_QUEUE_HIGH
+    setmembits r6
+    lw r6, EMERGENCY_QUEUE_LOW
+    add r7, r6, 8
+    atomadd_d r8, r7, 1                  # old count
+    add r9, r14, 64
+    bgt r9, r8, EMERG_REQ_SLOT, true
+    atomadd_d r8, r7, -1                 # full: undo and clear the flag, so the next spill to that node re-queues it
+    add r5, r5, -1
+    and r5, r5, 0xFFFF
+    sll r5, r5, 2
+    lw r9, EMERG_FLAG_LOW
+    add r9, r9, r5
+    sw_d r14, r9, 0
+    beq r15, r15, CLONE_HOOK_RET2, true
+EMERG_REQ_SLOT:
+    add r7, r6, 4
+    atomadd_d r8, r7, 4                  # old tail
+    and r8, r8, 0xFF
+    add r8, r8, r6
+    add r8, r8, 12
+EMERG_REQ_WAIT:
+    lbu_d r9, r8, 2
+    bne r9, r14, EMERG_REQ_WAIT, false
+    add r5, r5, -1                       # 0x80000000 | q: sh keeps q
+    sh_d r5, r8, 0
+    add r9, r14, 1
+    sb_d r9, r8, 2
+CLONE_HOOK_RET2:
+    and r14, r14, 0
+    jmp r15, r2
+# CLONE_REQUEST: busy side. Link r8. Uses r9-r14 only (r14 returns 0); restores membits to RAY_QUEUE_HIGH.
+CLONE_REQUEST:
+    and r14, r14, 0
+                                         # AI [95]: [90] CLONE_MAX_OWNERS limit removed
+    lw r9, IDLE_QUEUE_HIGH
+    setmembits r9
+    lw r10, IDLE_QUEUE_LOW
+    lw_d r11, r10, 8                     # peek count
+    blte r11, r14, CLONE_REQ_RET, true
+    lw r9, EMERGENCY_QUEUE_HIGH          # AI [100]: per-node request cooldown. {next_allowed, lock} at CLONE_REQ_CD_LOW + q*8 (stack 0).
+    setmembits r9                        #   Without it every owner of a hot node asked independently (no [90] cap): node 5 reached 1756
+    lw r9, ROOT_NODE_ID                  #   cores in run 69, then most of them left at once and the serialized exodus stalled the chip.
+    sll r9, r9, 3
+    lw r11, CLONE_REQ_CD_LOW
+    add r9, r9, r11
+    getclk r12
+    lw r11, CLONE_NEXT_REQ               # AI [137] (Alex): cooldown per requesting core (was per node in DRAM, which capped a node's
+    bgt r11, r12, CLONE_REQ_RET, true    #   growth at one core per cooldown no matter how many owners it had: linear growth)
+    add r13, r9, 4
+    atomadd_d r11, r13, 1
+    bne r11, r14, CLONE_REQ_RET, false   # another owner of my node is requesting right now
+    lw r11, CLONE_REQ_COOLDOWN
+    add r12, r12, r11
+    sw r12, CLONE_NEXT_REQ               # AI [137]: my next allowed request = now + cooldown
+    sw_d r14, r13, 0                     # release (late losers' increments are wiped here)
+    lw r9, IDLE_QUEUE_HIGH
+    setmembits r9
+    add r12, r10, 8
+    atomadd_d r11, r12, -1
+    bgt r11, r14, CLONE_REQ_CLAIM, true
+    atomadd_d r11, r12, 1                # undo
+    beq r15, r15, CLONE_REQ_RET, true
+CLONE_REQ_CLAIM:
+    atomadd_d r11, r10, 4                # old head
+    and r11, r11, 0x7FFF
+    add r11, r11, r10
+    add r11, r11, 20
+CLONE_REQ_WAIT:
+    lhu_d r12, r11, 2
+    beq r12, r14, CLONE_REQ_WAIT, false  # wait for the enqueuer to publish
+    lhu_d r12, r11, 0                    # idle core id
+    sh_d r14, r11, 2                     # free the slot
+    srl r13, r15, 4
+    beq r12, r13, CLONE_REQ_SELF, false  # never ask myself (AI fix [72]: but drop my registration, or I could never be asked again)
+    lw r11, CLONE_REQ_TABLE_LOW
+    sll r12, r12, 2
+    add r11, r11, r12
+    add r13, r13, 1
+    sw_d r13, r11, 0                     # REASSIGN[idle] = me + 1
+    beq r15, r15, CLONE_REQ_RET, true
+CLONE_REQ_SELF:
+    sw r14, PREVIOUSLY_IDLE              # AI fix [72]
+CLONE_REQ_RET:
+    lw r9, RAY_QUEUE_HIGH
+    setmembits r9
+    and r14, r14, 0
+    jmp r15, r8
+
+# AI [64]: the routines below were replaced by CLONE_IDLE_HOOK / CLONE_REQUEST ([53]) and are commented out to free SRAM (unchanged text, prefixed '#AI[64] ')
+#AI[64] is_idle_leaf:
+#AI[64]     getclk r3                               # r3 = current_cycle = get_cycle_count()
+#AI[64]     lw r4, LAST_OBSERVED_CYCLE              # r4 = self.last_observed_cycle
+#AI[64]     sub r3, r3, r4                          # r3 = time_diff = current_cycle - last_observed_cycle
+#AI[64]     and r14, r14, 0                         # r14 = 0 (zero register)
+#AI[64]     lw r5, IDLE_WINDOW                      # r5 = IDLE_WINDOW (minimum time between idle checks)
+#AI[64]     bgt r3, r5, PASSED_BRANCH_WINDOW, false # if time_diff <= IDLE_WINDOW goto return (too soon)
+#AI[64]     jmp r15, r2                             # return 0 (not enough time has passed)
+#AI[64] PASSED_BRANCH_WINDOW:
+#AI[64]     lw r4, PREVIOUSLY_IDLE                  # r4 = self.previously_idle
+#AI[64]     beq r4, r14, NOT_PREVIOUSLY_IDLE, false # if previously_idle == 0 goto NOT_PREVIOUSLY_IDLE
+#AI[64]     jmp r15, r2                             # return 0 (already marked idle, nothing to do)
+#AI[64] NOT_PREVIOUSLY_IDLE:
+#AI[64]     getclk r5                               # r5 = current_cycle (fresh timestamp)
+#AI[64]     sw r5, LAST_OBSERVED_CYCLE              # self.last_observed_cycle = current_cycle
+#AI[64]     lw r5, RAYS_PROCESSED                   # r5 = self.rays_processed
+#AI[64]     sw r14, RAYS_PROCESSED                  # self.rays_processed = 0 (reset counter)
+#AI[64]     sll r5, r5, 16                          # r5 = rays_processed << 16 (fixed-point scale for division)
+#AI[64]     div r5, r5, r3                          # r5 = ratio = (rays_processed << 16) / time_diff
+#AI[64]     lw r4, BRANCH_IDLE_THRESHOLD            # r4 = BRANCH_IDLE_THRESHOLD
+#AI[64]     blte r4, r5, ONLY_ENQUEUE_ONCE_IDLE_QUEUE, false # if ratio >= threshold goto ONLY_ENQUEUE_ONCE_IDLE_QUEUE (busy enough)
+#AI[64]     jmp r15, r2                             # return 0 (not idle enough to enqueue)
+#AI[64] ONLY_ENQUEUE_ONCE_IDLE_QUEUE:
+#AI[64]     add r6, r2, 0
+#AI[64]     jmp r2, ADD_IDLE_CORE
+#AI[64]     and r3, r3, 0
+#AI[64]     add r3, r3, PREVIOUSLY_IDLE
+#AI[64]     atomadd r3, r3, 1    
+#AI[64]     and r14, r14, 0                         # r14 = 0 (zero register)
+#AI[64]     add r14, r14, 1
+#AI[64]     jmp r15, r6                             # return 0 (already marked idle, nothing to do)
 
 
 
@@ -1593,7 +1940,8 @@ triangle_intersect:
     sw r7, r4, 36
     sw r9, r4, 40
     fplt r6, r10, r8
-    bne r6, r10, TRIANGLE_INTERSECT_ELSE_BLOCK_1, false
+    beq r6, r10, TRIANGLE_INTERSECT_ELSE_BLOCK_1, false   # AI fix [87]: was bne, so det > 0 got the det < 0 test (reject u > 0) and vice versa:
+                                                          #   every triangle was rejected (run 53: 1301 det checks, 0 past the u/v tests)
     fplt r6, r12, r10
     fplt r7, r8, r12
     or r6, r6, r7
@@ -1638,13 +1986,13 @@ TRIANGLE_INTERSECT_END_IF_BLOCK_1:
     fplt.32 r5, r7, r11
     fplt.32 r6, r8, r12
     or r5, r5, r6
-    bne r5, r11, TRIANGLE_INTERSECT_END_IF_BLOCK_2, true
+    beq r5, r11, TRIANGLE_INTERSECT_END_IF_BLOCK_2, true  # AI fix [87]: was bne (continued when the v test FAILED, returned when it passed)
     beq r15, r15, TRIANGLE_INTERSECT_RETURN, true
 TRIANGLE_INTERSECT_ELSE_BLOCK_2:
     fplt.32 r5, r11, r7
     fplt.32 r6, r12, r8
     or r5, r5, r6
-    bne r5, r11, TRIANGLE_INTERSECT_END_IF_BLOCK_2, true
+    beq r5, r11, TRIANGLE_INTERSECT_END_IF_BLOCK_2, true  # AI fix [87]: was bne (continued when the v test FAILED, returned when it passed)
     beq r15, r15, TRIANGLE_INTERSECT_RETURN, true
 TRIANGLE_INTERSECT_END_IF_BLOCK_2:
     fpsetacc.32 r11
@@ -1677,7 +2025,9 @@ TRIANGLE_INTERSECT_END_IF_BLOCK_3:
     jmp r10, RECIPROCAL
     fpmul.32 r5, r5, r9
     sw r5, r0, 36
-    lw r6, r2, 0
+    lw r6, INDEX_ARRAY_BASE         # AI fix: tri id is at INDEX_ARRAY_BASE + r2 (was `lw r6, r2, 0`, an absolute SRAM read into code)
+    add r6, r6, r2
+    lw r6, r6, 0
     sw r6, r0, 56
     beq r15, r15, TRIANGLE_INTERSECT_RETURN, true
 
@@ -1745,10 +2095,9 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     fpminmax.32 r3, r2, r3, true          # float tmax = max(t1, t2)
     lw r2, r0, 36
     fpminmax.32 r13, r2, r3, false          # tmax = min(tmax, ray->t_max)
-    fplt.32 r6, r12, r13                  # r6 = tmin < tmax
-    lw r10, EPSILON                 # float epsilon = self.epsilon
-    fplt.32 r8, r10, r13                # r8 = epsilon < tmax
-    and r11, r6, r8                     # r11 = (tmax >= tmin) && (tmax > epsilon)
+    lw r10, EPSILON                     # AI [109]: epsilon stays in r10 for the y/z axes
+    fpminmax.32 r12, r12, r10, true     # AI [109]: tmin = max(tmin, epsilon), so one compare covers both
+    fplt.32 r11, r12, r13               #   "tmin < tmax" and "epsilon < tmax" (was 2 compares + and per axis)
     beq r7, r11, AABB_INTERSECT_RETURN, false  # if (tmax < EPSILON) return false
     #doing y now
     lw r2, r1, 8
@@ -1763,9 +2112,7 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     fpminmax.32 r3, r2, r3, true          # float tmax = max(t1, t2)
     fpminmax.32 r13, r13, r3, false          # tmax = min(tmax, ray->t_max)
     fpminmax.32 r12, r12, r5, true          # tmin = max(tmin, t1)
-    fplt.32 r6, r12, r13                  # r6 = tmin < tmax
-    fplt.32 r8, r10, r13                # r8 = epsilon < tmax
-    and r11, r6, r8                     # r11 = (tmax >= tmin) && (tmax > epsilon)
+    fplt.32 r11, r12, r13               # AI [109]: tmin already includes epsilon
     beq r7, r11, AABB_INTERSECT_RETURN, false  # if (tmax < EPSILON) return false
     #doing z now
     lw r2, r1, 16                           # r2 = node->z_min
@@ -1780,9 +2127,7 @@ AABB_INTERSECT: #do not use r4, r9. r0 = ray, r1 = node, r7 = 0
     fpminmax.32 r3, r2, r3, true            # r3 = max(tz1, tz2)
     fpminmax.32 r13, r13, r3, false         # tmax = min(tmax, max(tz1, tz2))
     fpminmax.32 r12, r12, r5, true          # tmin = max(tmin, min(tz1, tz2))
-    fplt.32 r6, r12, r13                    # r6 = tmin < tmax
-    fplt.32 r8, r10, r13                     # r8 = epsilon < tmax
-    and r11, r6, r8                         # r11 = (tmin <= tmax) && (0.0 < tmax)
+    fplt.32 r11, r12, r13               # AI [109]: tmin already includes epsilon
     beq r15, r15, AABB_INTERSECT_RETURN, true # return r11
 
 #UNCONDITIONAL BRANCH
@@ -1793,10 +2138,16 @@ EAT_RAY_INTERRUPT: #working with r6-r14
     nonblock r7, 32                             # r7 = nb_recv(channel) (0 if no message waiting)
     and r14, r14, 0                         # r14 = 0 (zero register)
     bne r14, r7, CONTINUE_WITH_EAT_RAY_INTERRUPT, true  # if message waiting goto CONTINUE_WITH_EAT_RAY_INTERRUPT
-    intena 32                               # enable_interrupts(channel) (nothing to do)
+    nonblock r7, 33                         # AI fix [122b]: also take pipe 33. Interrupt enables survive a clone reboot, so a former
+    bne r14, r7, EAT_RAY_FROM_33, true      #   branch core can have 33 enabled; a request left there made that context re-enter
+    intena 32                               #   this handler forever. It now gets the normal wrong-core reject below.
     jmp r15, r4                             # return
+EAT_RAY_FROM_33:
+    block r7, 33
+    beq r15, r15, EAT_RAY_GOT, true
 CONTINUE_WITH_EAT_RAY_INTERRUPT:
     block r7, 32                                # r7 = blocking_recv(channel) (full flit value)
+EAT_RAY_GOT:
     add r5, r7, 0                           # save full message
     and r6, r15, 0xF                        # save return address to per-thread SRAM slot
     sll r6, r6, 2
@@ -1817,10 +2168,9 @@ reject_ray_interrupt:
     add r10, r14, 8                         # r10 = wrong_core = 8 (reject code)
     sll r10, r10, 24                        # r10 = wrong_core << 24
     and r11, r5, 0xF                       # r11 = self.thread_id (low 4 bits)
-    and r12, r5, 0xFFF0                      # r12 = core_id high nibble
-    sll r12, r12, 15
-    srl r12, r12, 15
-    sll r12, r12, 2                         # r12 = core_id high nibble shifted to channel position
+    srl r12, r5, 4                          # AI fix [47]: full 13-bit core id (was `and r12, r5, 0xFFF0`, 12 bits: cores >= 4096 misrouted)
+    sll r12, r12, 19
+    srl r12, r12, 13                        # r12 = core_id << 6 (channel position)
     add r11, r11, 16                        # r11 = self.thread_id + 16 (send channel)
     or r11, r12, r11                        # r11 = destination flit (channel | thread_id)
     sendflit r10, r11                       # send_flit(wrong_core << 24, dest) (reject: wrong node)
@@ -1831,12 +2181,13 @@ NODE_IDS_MATCH:
     bne r14, r7, reject_ray_interrupt, false # if flushing_queue != 0 goto reject_ray_interrupt
     lbu r9, r0, 63                          # r7 = ray->active_ray (byte at ray+63)
     add r7, r0, 0                           # r9 = local_queue = ray base address
-    beq r14, r9, RECEIVE_RAY_DATA, false   # if ray slot is empty (active_ray == 0) goto RECEIVE_RAY_DATA
+    bne r14, r14, RECEIVE_RAY_DATA, false   # AI fix: never taken (see branch EAT_RAY_INTERRUPT): direct deposit skipped r1 = ROOT_NODE_ADDRESS and word40 = BRANCH_LOCAL_LEAF_INDEX
     add r9, r14, RAY_QUEUE_CNT                # r9 = sender ray queue base address
-    atomadd r7, r9, 1                       # r7 = old_count = atomic_add(&queue.count, 1)
+    add r10, r9, 2064                       # AI fix [124]: r10 = &used (RAY_QUEUE_HEAD + 2072, spare part of RAY_QUEUE_ENTRIES):
+    atomadd r7, r10, 1                      #   slots taken and not yet freed by their consumer (see branch [124])
     add r12, r14, 16                        # r12 = 16 (max queue entries)
-    bgt r12, r7, SPACE_IN_QUEUE, true     # if old_count < 16 goto SPACE_IN_QUEUE
-    atomadd r7, r9, -1                      # revert: atomic_add(&queue.count, -1)
+    bgt r12, r7, SPACE_COUNT_UP, true     # if old_used < 16: reserve
+    atomadd r7, r10, -1                     # full: undo
     add r7, r14, 7                          # r7 = reject_ray = 7 (reject code)
     sll r7, r7, 24                          # r7 = reject_ray << 24
     srl r9, r8, 4 # was and r9, r8, 0xF0    # r9 = core_id high nibble
@@ -1846,8 +2197,22 @@ NODE_IDS_MATCH:
     add r8, r8, 16                          # r8 = thread_id + 16 (send channel)
     or r9, r9, r8                           # r9 = destination flit
     sendflit r7, r9                         # send_flit(reject_ray << 24, dest) (queue full)
+    getclk r7                               # AI [143] (Alex): busyness. Time the rejects: one within IDLE_WINDOW (50K) of the previous
+    lw r9, REJ_LAST_TS                      #   reject adds to REJ_CNT, an older one starts it over at 1. SRAM / ALU only after the
+    sub r9, r7, r9                          #   sendflit, so no context switch can split it (contexts switch only on yield, blocking
+    sw r7, REJ_LAST_TS                      #   receives and not-ready registers): no atomics needed even if several contexts reject.
+    lw r10, IDLE_WINDOW
+    lw r12, REJ_CNT
+    add r12, r12, 1
+    bgt r10, r9, REJ_CNT_KEEP, true
+    and r12, r12, 0
+    add r12, r12, 1
+REJ_CNT_KEEP:
+    sw r12, REJ_CNT
     intena 32                               # enable_interrupts(channel)
     jmp r15, r4                             # return
+SPACE_COUNT_UP:
+    atomadd r7, r9, 1                       # AI fix [124]: count = rays available to consumers
 SPACE_IN_QUEUE:
     add r9, r9, -4                          # r9 = &queue.tail_relative (back up to tail field)
     atomadd r7, r9, 64                      # r7 = old_tail = atomic_add(&queue.tail_relative, 64)
@@ -1867,7 +2232,7 @@ RECEIVE_RAY_DATA:
     or r10, r10, r8                         # r10 = destination flit
     sendflit r9, r10                        # send_flit(ray_ack << 24 | self, dest) (signal ready to receive)
     and r8, r15, 0xF                        # r8 = self.thread_id (receive channel low bits)
-    add r8, r8, 16                          # r8 = self.thread_id + 16 (receive channel)
+    add r8, r8, 0                           # AI fix: read ray data from the data mailbox (thread_id), not 16+thread_id
     block r9, r8                            # r9  = ray_data[0]  = blocking_recv(channel)
     block r10, r8                           # r10 = ray_data[1]
     block r11, r8                           # r11 = ray_data[2]
@@ -1900,13 +2265,18 @@ RECEIVE_RAY_DATA:
     sw r10, r7, 52                          # slot[52] = ray_data[13]
     sw r11, r7, 56                          # slot[56] = ray_data[14]
     sw r12, r7, 60                          # slot[60] = ray_data[15]
+    add r9, r14, 1                          # AI fix [83]: publish the slot only now. RAY_QUEUE_CNT was bumped before the 16 words arrived
+    sb r9, r7, 63                           #   (the `block` receives switch contexts), so ray_done could copy a half-empty slot: zero rays
+                                            #   (run 49: ~1800 leaf contexts stuck traversing all-zero rays). Consumers now wait for byte 63.
     and r9, r14, 0                          # reset EAT_RAY_RETURN_ADDR[tid] = -1
     add r9, r9, -1
     and r10, r15, 0xF
     sll r10, r10, 2
     add r10, r10, EAT_RAY_RETURN_ADDR
     sw r9, r10, 0
-    lw r1, ROOT_NODE_ADDRESS
+                                            # AI fix [52]: removed `lw r1, ROOT_NODE_ADDRESS` here. This handler runs inside whatever context yielded,
+                                            #   and traversal yields at START_SEARCHING on every step, so it reset that context's current node (r1)
+                                            #   to the leaf root mid-traversal (left over from the direct-deposit path disabled in [16]).
     intena 32                               # enable_interrupts(channel)
     jmp r15, r4                             # return
 
@@ -1914,7 +2284,283 @@ RECEIVE_RAY_DATA:
 
 
 
+IRQ_CTX:                                 # AI [115]: dedicated interrupt context (15). Handlers return to the yield.
+    intena 32
+    intena 33                            # AI [122b]: back on (was off in [116b]): the leaf handler now takes 33 too, so a stray
+    intena 34                            #   request there gets a reject instead of waiting forever.
+IRQ_CTX_LOOP:
+    yield r8
+    beq r15, r15, IRQ_CTX_LOOP, true
+NOC_GEO_RECEIVE:                         # AI [102]: link r13, r14 = 0. NoC clone boot: receive the geometry from a live owner of my node
+                                         #   (Alex's original protocol: the requester streams its SRAM contents over the NoC) instead of the
+                                         #   DFS download from DRAM. Returns (-> DFS from DRAM) if this is no NoC clone, the source no longer
+                                         #   owns my node, or nothing arrives within NOC_RX_TIMEOUT cycles.
+    lw r12, EMERGENCY_QUEUE_HIGH         # stack 0
+    setmembits r12
+    srl r11, r15, 4                      # my core id
+    sll r12, r11, 2
+    lw r10, CLONE_SRC_LOW
+    add r12, r12, r10                    # &CLONE_SRC[me]
+    lw_d r10, r12, 0                     # source core + 1 (written by my donor path), 0 = none
+    beq r10, r14, NOC_RX_FAIL, true
+    sw_d r14, r12, 0                     # consume
+    add r10, r10, -1
+    sll r7, r10, 6                       # source core << 6
+    add r6, r14, 16                      # AI [113]: replies (OFFER/REFUSE/BUSY/NACK) come to my response mailbox 16 + context (context 0
+NOC_RX_DRAIN:                            #   at boot), lane 0. Only the REQUEST travels on the source's pipe 34 (lane 1). Drop stale words first.
+    nonblock r12, r6
+    beq r12, r14, NOC_RX_DRAINED, true
+    block r12, r6
+    beq r15, r15, NOC_RX_DRAIN, true
+NOC_RX_DRAINED:
+    or r10, r7, 34                       # source, pipe 34
+    jmp r12, NOC_NODE_KEY                # r9 = key of my node
+    sll r11, r11, 17
+    or r5, r11, r9                       # r5 = REQUEST: (my core id << 17) | node key, bit 31 = 0 (r4, r5 are free before the DFS)
+    getclk r4
+    lw r12, NOC_RX_TIMEOUT
+    add r4, r4, r12                      # r4 = deadline
+NOC_RX_SEND:
+    sendflit r5, r10                     # 1. REQUEST
+NOC_RX_WAIT:
+    nonblock r12, r6
+    bne r12, r14, NOC_RX_GOT, true
+    getclk r12
+    bgt r4, r12, NOC_RX_WAIT, true
+    beq r15, r15, NOC_RX_FAIL, true      # AI [113]: timeout, no CANCEL: a source that offers drops it after NOC_GO_TIMEOUT by itself; a
+                                         #   late reply left in mailbox 16 is skipped by the ray-send loop (bit 31 set)
+NOC_RX_GOT:
+    block r12, r6
+    srl r8, r12, 4                       # AI [113]: r8 = the source's streaming context (bits 4..7 of an OFFER, 0 in the others)
+    and r8, r8, 0xF
+    sll r11, r8, 4
+    sub r12, r12, r11                    # strip it
+    lw r11, NOC_MAGIC
+    beq r12, r11, NOC_RX_GO, true        # 2. OFFER  (0xE0000001 | ctx << 4)
+    add r11, r11, 1
+    beq r12, r11, NOC_RX_FAIL, true      # 2'. REFUSE (0xE0000002): the source left the node
+    add r11, r11, 1
+    beq r12, r11, NOC_RX_BUSY, true      # 2''. BUSY (0xE0000003): it is streaming to another clone
+    add r11, r11, 1
+    beq r12, r11, NOC_RX_BUSY, true      # AI [113] 2'''. NACK (0xE0000004): the router bounced my REQUEST (source pipe 34 full)
+    beq r15, r15, NOC_RX_WAIT, true      # anything else: stale, ignore
+NOC_RX_BUSY:
+    getclk r12
+    add r12, r12, 2000
+NOC_RX_PAUSE:
+    getclk r11
+    bgt r12, r11, NOC_RX_PAUSE, true
+    bgt r4, r11, NOC_RX_SEND, true       # ask again until the deadline
+    beq r15, r15, NOC_RX_FAIL, true      # (no offer outstanding, so no CANCEL)
+NOC_RX_GO:
+    srl r11, r15, 4                      # 3. GO = 0xC0000000 | my id: only now does the source stream (on my pipe 0)
+    add r12, r14, 3
+    sll r12, r12, 30
+    or r11, r11, r12
+    add r12, r8, 16                      # AI [113]: GO goes to the source's response mailbox 16 + its streaming context, lane 0
+    or r12, r7, r12
+    sendflit r11, r12
+    getclk r4                            # AI [113]: the source streams only within NOC_GO_TIMEOUT of its OFFER, so a stream not started
+    lw r12, NOC_GO_TIMEOUT               #   2x that after my GO never will: fall back to DRAM instead of blocking forever.
+    add r4, r4, r12
+    add r4, r4, r12
+NOC_RX_FIRST:
+    nonblock r9, r14
+    bne r9, r14, NOC_RX_REGION, true
+    getclk r12
+    bgt r4, r12, NOC_RX_FIRST, true
+    beq r15, r15, NOC_RX_FAIL, true
+NOC_RX_REGION:                           # stream: {SRAM addr, word count, words...}*, 0
+    block r9, r14
+    beq r9, r14, NOC_RX_OK, true
+    block r10, r14
+NOC_RX_WORD:
+    block r11, r14
+    sw r11, r9, 0
+    add r9, r9, 4
+    add r10, r10, -1
+    bne r10, r14, NOC_RX_WORD, true
+    beq r15, r15, NOC_RX_REGION, true
+NOC_RX_OK:
+    add r9, r14, 1
+    sw r9, NOC_CLONED                    # leaf dfs_done skips the DRAM index/vertex copy
+    lw r12, RAY_QUEUE_HIGH
+    setmembits r12
+    beq r15, r15, dfs_done, true
+NOC_RX_FAIL:
+    jmp r15, r13
+NOC_GEO_SEND_INTERRUPT:                  # AI [102]: pipe 34 (was the unfinished SWITCH_ROLES_INTERRUPT). A NoC clone asks for my geometry:
+                                         #   flit 1 = its core id, flit 2 = the queue address of the node it is joining. Same handler
+    add r4, r8, 0                        #   convention as EAT_RAY_INTERRUPT (return address r8 -> r4; uses r4, r6-r14).
+    intdis 34
+    and r14, r14, 0
+    add r6, r14, 34
+    nonblock r7, r6
+    bne r7, r14, NOC_GS_GO, true
+    intena 34
+    jmp r15, r4
+NOC_GS_GO:
+    block r7, r6                         # one handshake word
+    srl r9, r7, 31
+    beq r9, r14, NOC_GS_REQ, true
+    intena 34                            # AI [113]: only REQUESTs travel on pipe 34 now; a bit-31 word is stale: drop
+    jmp r15, r4
+NOC_GS_REQ:
+    add r9, r14, NOC_GS_BUSY             # AI [102b]: one stream at a time per core
+    atomadd r9, r9, 1
+    bne r9, r14, NOC_GS_BUSYREPLY, false
+    sll r11, r7, 15
+    srl r11, r11, 15                     # its key
+    srl r7, r7, 17                       # clone core id
+    jmp r12, NOC_NODE_KEY                # r9 = my node's key
+    sll r13, r7, 6
+    or r13, r13, 16                      # AI [113]: clone's response mailbox 16 (it asks from context 0 at boot), lane 0
+    lw r10, NOC_MAGIC
+    beq r9, r11, NOC_GS_OFFER, true
+    add r10, r10, 1                      # 2'. REFUSE: I no longer own that node (it falls back to DRAM)
+    sendflit r10, r13
+    beq r15, r15, NOC_GS_RET, true
+NOC_GS_OFFER:
+    and r9, r15, 0xF                     # AI [113]: OFFER = NOC_MAGIC | (my context << 4): the clone sends GO to my 16 + context
+    sll r9, r9, 4
+    or r9, r10, r9
+    sendflit r9, r13                     # 2. OFFER
+    getclk r11
+    lw r9, NOC_GO_TIMEOUT
+    add r11, r11, r9                     # deadline for the clone's GO
+NOC_GS_WAITGO:                           # AI [113]: GO/CANCEL arrive in my own response mailbox 16 + context; I also keep pipe 34 drained
+    and r12, r15, 0xF                    #   (contexts switch only on yield/stall, so nobody else reads it while I spin) [102e]
+    add r12, r12, 16
+    nonblock r9, r12
+    bne r9, r14, NOC_GS_GOTGO, true
+    nonblock r9, r6
+    bne r9, r14, NOC_GS_GOTWORD, true
+    getclk r9
+    bgt r11, r9, NOC_GS_WAITGO, true
+    beq r15, r15, NOC_GS_RET, true       # no answer: the clone gave up, do not stream
+NOC_GS_GOTWORD:
+    block r9, r6
+    srl r12, r9, 31
+    bne r12, r14, NOC_GS_WAITGO, true    # AI [113]: stale bit-31 word on 34: drop
+    srl r12, r9, 17                      # another clone's REQUEST: answer BUSY right away
+    sll r12, r12, 6
+    or r12, r12, 16                      # AI [113]: to its response mailbox 16
+    add r8, r10, 2
+    sendflit r8, r12
+    beq r15, r15, NOC_GS_WAITGO, true
+NOC_GS_GOTGO:
+    and r12, r15, 0xF                    # AI [113]: read it from my 16 + context
+    add r12, r12, 16
+    block r9, r12
+    sll r12, r9, 3
+    srl r12, r12, 3                      # id field
+    bne r12, r7, NOC_GS_WAITGO, true     # not my clone (stale): keep waiting
+    srl r12, r9, 29
+    add r8, r14, 4
+    beq r12, r8, NOC_GS_RET, true        # 3'. CANCEL (0x80000000 | id)
+    add r8, r14, 6
+    bne r12, r8, NOC_GS_WAITGO, true     # not a GO either: keep waiting
+    sll r9, r7, 6                        # 3. GO (0xC0000000 | id): stream on the clone's pipe 0
+NOC_GS_OK:
+    add r10, r14, ROOT_NODE_ADDRESS
+    add r11, r14, 1
+    jmp r12, NOC_SEND_REGION
+    add r10, r14, ROOT_NODE_ID
+    add r11, r14, 1
+    jmp r12, NOC_SEND_REGION
+    add r10, r14, FOUND_LEAF_CORE_INDEX_FOR_BRANCH
+    add r11, r14, 1
+    jmp r12, NOC_SEND_REGION
+    add r10, r14, SRAM_NODE_ALLOC_PTR
+    add r11, r14, 1
+    jmp r12, NOC_SEND_REGION
+    add r10, r14, INDEX_ARRAY_BASE
+    add r11, r14, 1
+    jmp r12, NOC_SEND_REGION
+    add r10, r14, VERTEX_ARRAY_BASE
+    add r11, r14, 1
+    jmp r12, NOC_SEND_REGION
+    add r10, r14, LEAF_GEO_END           # AI fix [118]: send LEAF_GEO_END too. It is set only by the DRAM copy, so a NoC clone kept the
+    add r11, r14, 1                      #   image default 0, and when it later served as a source it streamed (0 - NODE_ARRAY_TOP) >> 2
+    jmp r12, NOC_SEND_REGION             #   = ~1G words: run 86 had 184 clones and their sources stuck in that stream forever.
+    lw r10, NODE_ARRAY_TOP               # nodes + triangle indices + vertices: [NODE_ARRAY_TOP, LEAF_GEO_END)
+    lw r11, LEAF_GEO_END
+    sub r11, r11, r10
+    srl r11, r11, 2
+    jmp r12, NOC_SEND_REGION
+    sendflit r14, r9                     # end of stream
+NOC_GS_RET:
+    sw r14, NOC_GS_BUSY
+    intena 34
+NOC_GS_BACKOFF:
+    jmp r15, r4
+NOC_GS_BUSYREPLY:                        # AI [102d]: another context is streaming. Read the request and answer BUSY: pipes >= 16 hold one
+    srl r7, r7, 17                       #   flit, and an unread word blocks lane 1 (ray requests 32/33) at this router.
+    sll r13, r7, 6
+    or r13, r13, 16                      # AI [113]: BUSY to the clone's response mailbox 16
+    lw r10, NOC_MAGIC
+    add r10, r10, 2
+    sendflit r10, r13
+    intena 34
+    jmp r15, r4
+NOC_NODE_KEY:                            # AI [102b]: link r12. r9 = ((RAY_QUEUE_HIGH & 3) << 15) | ((RAY_QUEUE_LOW >> 17) & 0x7FFF): identifies my
+    lw r9, RAY_QUEUE_HIGH                #   node's queue (queues are 128KB apart from 1_115_000_000 in each stack). Uses r8, r9.
+    and r9, r9, 3
+    sll r9, r9, 15
+    lw r8, RAY_QUEUE_LOW
+    srl r8, r8, 17
+    and r8, r8, 0x7FFF
+    or r9, r9, r8
+    jmp r15, r12
+NOC_SEND_REGION:                         # link r12: r10 = SRAM address, r11 = word count (skipped if 0), r9 = destination. Uses r13.
+    beq r11, r14, NOC_SR_RET, false
+    sendflit r10, r9
+    sendflit r11, r9
+NOC_SR_LOOP:                             # AI [102e]: keep pipe 34 drained while streaming (BUSY to new requests, drop stale words)
+    nonblock r8, r6
+    bne r8, r14, NOC_SR_POLL, false
+NOC_SR_WORD:
+    lw r13, r10, 0
+    sendflit r13, r9
+    add r10, r10, 4
+    add r11, r11, -1
+    bne r11, r14, NOC_SR_LOOP, true
+    beq r15, r15, NOC_SR_RET, true
+NOC_SR_POLL:
+    block r8, r6
+    srl r7, r8, 31
+    bne r7, r14, NOC_SR_WORD, true       # stale GO/CANCEL: drop
+    srl r7, r8, 17
+    sll r7, r7, 6
+    or r7, r7, 16                        # AI [113]: BUSY to the clone's response mailbox 16
+    lw r8, NOC_MAGIC
+    add r8, r8, 2
+    sendflit r8, r7                      # BUSY
+    beq r15, r15, NOC_SR_WORD, true
+NOC_SR_RET:
+    jmp r15, r12
 download_bvh_tree:
+    and r14, r14, 0
+    # AI [152] (Alex): point the read-only math tables at this core's own stack (main.rs writes a copy into every stack at
+    #   2_000_000_000+). Stack = (core_id >> 12) * 4 + ((core_id >> 5) & 3); membits = stack >> 1, address bit 31 = stack & 1.
+    srl r9, r15, 4                       # core id
+    srl r10, r9, 12                      # y_stack
+    sll r10, r10, 2
+    srl r9, r9, 5
+    and r9, r9, 3                        # x_stack
+    or r9, r9, r10                       # my stack 0..7
+    srl r10, r9, 1                       # r10 = membits of my stack
+    and r9, r9, 1
+    sll r9, r9, 31                       # r9 = bit 31 of my stack
+    sw r10, DIV_TABLE_HIGH
+    lw r11, DIV_TABLE_LOW
+    or r11, r11, r9
+    sw r11, DIV_TABLE_LOW
+    sw r10, INV_SQRT_TABLE_HIGH
+    lw r11, INV_SQRT_TABLE_LOW
+    or r11, r11, r9
+    sw r11, INV_SQRT_TABLE_LOW
+    jmp r13, NOC_GEO_RECEIVE             # AI [102]: returns only when the geometry must come from DRAM (DFS below)
 
     and r14, r14, 0                          # r14 = 0
 
@@ -2038,6 +2684,9 @@ SKIP_NON_BRANCH_IMPORT:
     and r14, r14, 0
     # if (parent_ptr != 0xFFFF) patch parent child pointer
     or r14, r14, 0xFFFF
+    srl r14, r14, 16                         # AI fix [99]: the immediate sign-extends to 0xFFFFFFFF, never equal to the lhu parent_ptr 0xFFFF,
+                                             #   so the root was "patched" through patch_left = 0: SRAM word 0 (reboot entry) = 16704. The next
+                                             #   reboot of that core hit an invalid opcode (run 67 crash; run 68 BOOT_CLOBBER at this sh).
     beq r5, r14, SKIP_PATCH, true
     and r14, r14, 0
     bne r8, r14, PATCH_RIGHT_CHILD, true
@@ -2048,7 +2697,9 @@ PATCH_RIGHT_CHILD:
 SKIP_PATCH:
     lbu r10, r13, 30        #load is_right
     and r14, r14, 0         #r14 = 0
-    bne r10, r14, dfs_loop, false       #if is_right != 0, dfs_loop
+    bne r14, r14, dfs_loop, false       # AI fix: never taken. Was `bne r10, r14` (is_right != 0 -> dfs_loop): right children were never
+                                        #   recursed, so the leaf missed half of the branch treelet and, when its own root is a right child,
+                                        #   never set ROOT_NODE_ADDRESS (rays then started at SRAM 0). Full treelet + own subtree fits (worst 32700/32768 B).
     lw r10, r13, 36                #r10 == queue_low_bit_addr   
     bne r10, r11, CHECK_RECURSE, true
     sw r13, ROOT_NODE_ADDRESS          # store the SRAM node pointer
@@ -2128,10 +2779,12 @@ dfs_done:
     # *(self.leaf_core_lookup_table + 256) = self->root_node;
     and r14, r14, 0
     lw r10, JUMP_TO_RAY_EAT_INTERRUPT
-    sw r10, 49024
-    sw r10, 49028
+    sw r10, 65408
+    sw r10, 65412
     lw r10, JUMP_TO_SWITCH_ROLES_INTERRUPT
-    sw r10, 49032
+    sw r10, 65416
+    lw r10, NOC_CLONED                   # AI [102]: geometry already arrived over the NoC: skip the DRAM index/vertex copy
+    bne r10, r14, vertex_copy_done, false
     # set_address_bits(self.node_array_high);
     lw r12, RAY_QUEUE_HIGH
     setmembits r13, r12
@@ -2163,6 +2816,7 @@ index_copy_loop:
 index_copy_done:
     add r6, r4, 0
     add r4, r4, r3
+    sw r4, LEAF_GEO_END                  # AI [102]: end of this core's geometry (what a NoC clone source streams)
 vertex_copy_loop:
     blte r4, r6, vertex_copy_done, false
 
@@ -2196,6 +2850,9 @@ queue_loop_1:
     beq r15, r15, queue_loop_1, true
 
 queue_loop_1_done:
+    add r1, r14, RAY_QUEUE_HEAD          # AI fix [148]: zero the [124] `used` counter (RAY_QUEUE_HEAD + 2072) too. Only head/tail/count
+    add r1, r1, 2072                     #   were cleared, and this SRAM is not downloaded, so a clone kept its old role's data there.
+    sw r14, r1, 0
 
     # *(self.local_queue_flushing) = 0;
     sw r14, LOCAL_QUEUE_FLUSHING
@@ -2223,12 +2880,60 @@ queue_loop_1_done:
 
     # *(local_queue_flushing) = 0;
     sw r14, LOCAL_QUEUE_FLUSHING
+    lw r10, 65520                        # AI [61]: clone reboot? (flag from initialize_core) -> register as an owner now
+    and r14, r14, 0
+    beq r10, r14, CLONE_REG_DONE, true
+    sw r14, 65520
+    getclk r10                           # AI [100]: minimum residency: a clone may not register as idle for CLONE_RESIDENCY cycles
+    lw r11, CLONE_RESIDENCY              #   (reuses the warm-up gate, which the reboot reset to CLONE_WARMUP)
+    add r10, r10, r11
+    sw r10, CLONE_WARMUP
+    lw r2, RAY_QUEUE_HIGH
+    setmembits r2
+    lw r3, RAY_QUEUE_LOW
+    add r4, r3, 12
+    atomadd_d r5, r4, 1                  # my ticket
+CLONE_REG_TICKET:
+    lw_d r6, r3, 16
+    bne r6, r5, CLONE_REG_TICKET, true
+    add r4, r3, 20
+    add r6, r14, -8192
+    atomadd_d r7, r4, r6                 # writer lock
+CLONE_REG_WRITER:
+    lw_d r7, r4, 0
+    bne r7, r6, CLONE_REG_WRITER, true
+    add r4, r3, 24
+    atomadd_d r7, r4, 1                  # old owner_count = my slot index
+     sw r7, CLONE_MY_SLOT                 # remember where I registered (O(1) leave fast path)
+    sll r7, r7, 1
+    add r7, r7, r3
+    srl r8, r15, 4
+    sh_d r8, r7, 28                      # core_slots[index] = me
+    add r4, r3, 20
+    atomadd_d r7, r4, 8192               # release the writer lock
+    add r4, r3, 16
+    atomadd_d r7, r4, 1                  # now_serving++
+    lw r2, EMERGENCY_QUEUE_HIGH          # AI [95]: node occupied again: clear its emergency flag
+    setmembits r2
+    lw r3, ROOT_NODE_ID
+    sll r3, r3, 2
+    lw r4, EMERG_FLAG_LOW
+    add r4, r4, r3
+    sw_d r14, r4, 0
+    lw r2, RAY_QUEUE_HIGH
+    setmembits r2
+CLONE_REG_DONE:
     intena 32
     intena 34
     intena 35
     intena 36
     setctx 16
     relinquish true
+    and r14, r14, 0                      # AI [115] (Alex): context 15 is a dedicated interrupt context: it only yields, so every
+    and r2, r15, 0xF                     #   request on pipes 32/33/34 is answered within a round of context switches, even when all
+    xor r2, r2, 15                       #   workers spin without yielding (run 84 stall). Workers keep 32/33 as before.
+    beq r2, r14, IRQ_CTX, false
+    intdis 34                            # AI [115]: clone requests (34) are served by context 15 only (context 0 enabled it above)
     and r14, r14, 0
     # ray_base = self.ray_array_base;
     add r1, r14, RAY_ARRAY
@@ -2247,150 +2952,151 @@ queue_loop_1_done:
     beq r15, r15, ray_done, true
 
    
-ADD_IDLE_CORE:
-    lw r3, IDLE_QUEUE_HIGH                  # r3 = self.idle_queue_address_high
-    setmembits r3, r7                       # set_address_bits(idle_queue_high), r7 = old membits (saved)
-    lw r4, IDLE_QUEUE_LOW                   # r4 = idle_queue_address_low (base of idle_core_queue_dram)
-    add r4, r4, 8                           # r4 = &idle_queue.count (skip head_relative + tail_relative)
-    atomadd_d r5, r4, 1                     # r5 = old_count = atomic_add_dram(&count, 1)
-    add r4, r4, -4                          # r4 = &idle_queue.tail_relative
-    atomadd_d r5, r4, 4                     # r5 = old_tail = atomic_add_dram(&tail_relative, 4)
-    add r4, r4, 16                           # r4 = &idle_queue.slots (skip tail_relative + count)
-    and r5, r5, 0x7FFF                      # r5 = slot_offset = old_tail & 0x7FFF (wrap within slots)
-    add r4, r4, r5                          # r4 = slot_addr = &slots + slot_offset
-IDLE_CORE_INSERT_SPINLOCK:
-    lhu_d r5, r4, 2                         # r5 = is_valid = load_dram_half(slot_addr + offsetof(is_valid))
-    bne r14, r5, IDLE_CORE_INSERT_SPINLOCK, false  # spin until is_valid == 0 (slot is free)
-    srl r5, r15, 4                          # r5 = self.core_id = r15 >> 4 (strip thread_id bits)
-    sh_d r5, r4, 0                          # store_dram_half(core_id, slot_addr + offsetof(core_id))
-    add r5, r14, 1                          # r5 = 1
-    sh_d r5, r4, 2                          # store_dram_half(1, slot_addr + offsetof(is_valid)) (mark ready)
-    jmp r15, r2                             # return
+# AI [64]: the routines below were replaced by CLONE_IDLE_HOOK / CLONE_REQUEST ([53]) and are commented out to free SRAM (unchanged text, prefixed '#AI[64] ')
+#AI[64] ADD_IDLE_CORE:
+#AI[64]     lw r3, IDLE_QUEUE_HIGH                  # r3 = self.idle_queue_address_high
+#AI[64]     setmembits r7, r3                       # set_address_bits(idle_queue_high), r7 = old membits (saved)  AI fix: operands were swapped
+#AI[64]     lw r4, IDLE_QUEUE_LOW                   # r4 = idle_queue_address_low (base of idle_core_queue_dram)
+#AI[64]     add r4, r4, 8                           # r4 = &idle_queue.count (skip head_relative + tail_relative)
+#AI[64]     atomadd_d r5, r4, 1                     # r5 = old_count = atomic_add_dram(&count, 1)
+#AI[64]     add r4, r4, -4                          # r4 = &idle_queue.tail_relative
+#AI[64]     atomadd_d r5, r4, 4                     # r5 = old_tail = atomic_add_dram(&tail_relative, 4)
+#AI[64]     add r4, r4, 16                           # r4 = &idle_queue.slots (skip tail_relative + count)
+#AI[64]     and r5, r5, 0x7FFF                      # r5 = slot_offset = old_tail & 0x7FFF (wrap within slots)
+#AI[64]     add r4, r4, r5                          # r4 = slot_addr = &slots + slot_offset
+#AI[64] IDLE_CORE_INSERT_SPINLOCK:
+#AI[64]     lhu_d r5, r4, 2                         # r5 = is_valid = load_dram_half(slot_addr + offsetof(is_valid))
+#AI[64]     bne r14, r5, IDLE_CORE_INSERT_SPINLOCK, false  # spin until is_valid == 0 (slot is free)
+#AI[64]     srl r5, r15, 4                          # r5 = self.core_id = r15 >> 4 (strip thread_id bits)
+#AI[64]     sh_d r5, r4, 0                          # store_dram_half(core_id, slot_addr + offsetof(core_id))
+#AI[64]     add r5, r14, 1                          # r5 = 1
+#AI[64]     sh_d r5, r4, 2                          # store_dram_half(1, slot_addr + offsetof(is_valid)) (mark ready)
+#AI[64]     jmp r15, r2                             # return
 
-SEARCH_FOR_IDLE_CORES: #There's no documentation of who uses this function
-#I am going to assume that r3 has a return address
-    and r14, r14, 0                     # r14 = 0 (zero register)
-    lw r5, IDLE_QUEUE_HIGH      # r5 = self.idle_queue_address_high
-    add r5, r14, DFS_STACK              # r5 = &DFS_STACK (dfs stack pointer)
-    setmembits r5, r5                   # set_address_bits(DFS_STACK), r5 = old membits (discarded)
-    lw r6, IDLE_QUEUE_LOW       # r6 = current = self.idle_queue_address_low
-    or r8, r8, 0xFFFF                   # r8 = 0xFFFFFFFF (found_core_id sentinel = not found)
-    atomadd_d r9, r6, -1                # r9 = old_count = atomic_add_dram(current.count, -1)
-    add r4, r6, 0                       # r4 = current (base addr of leaf idle_core_queue_dram)
-    bgt r9, r14, CLAIM_SLOT, false      # if old_count > 0 goto CLAIM_SLOT (fast path: slot available)
-    atomadd_d r9, r6, 1                 # revert: atomic_add_dram(current.count, 1)
-    lw_d r7, r6, 12                     # r7 = current.parent_node_high (idle_core_queue_dram.parent_node_high)
-    lw_d r6, r6, 16                     # r6 = current.parent_node_low (idle_core_queue_dram.parent_node_low)
-    setmembits r7                       # set_address_bits(parent_node_high)
-ASCEND:
-    lh_d r9, r6, 24                     #r9 = is_left
-    lh_d r10, r6, 26                    #r10 = height
-    lw_d r11, r6, 0                     #r11 = parent_high
-    sw r11, SAVED_BRANCH_HIGH           # save parent_high before DFS_LOOP clobbers r11
-    lw_d r12, r6, 4                     #r12 = parent_low
-    sw r12, SAVED_BRANCH_LOW            # save parent_low before DFS_LOOP clobbers r12
-    or r13, r13, 0xFFFF                 # r13 = 0xFFFFFFFF (sentinel for null parent)
-    beq r11, r13, SEARCH_DONE, false    # if parent_high == 0xFFFFFFFF goto SEARCH_DONE (reached root)
-    setmembits r11                      # set_address_bits(parent_high)
-PUSH_SIBLING:
-    beq r14, r9, RIGHT_NODE, false      # if is_left == 0 goto RIGHT_NODE (we are right child, sibling is left)
-    lw_d r6, r12, 16                    # r6 = sibling_high = parent->right_high (we are left child)
-    lw_d r7, r12, 20                    # r7 = sibling_low = parent->right_low
-    beq r15, r15, SKIP_RIGHT_NODE, true # unconditional goto SKIP_RIGHT_NODE
-RIGHT_NODE:
-    lw_d r6, r12, 8                     # r6 = sibling_high = parent->left_high (we are right child)
-    lw_d r7, r12, 12                    # r7 = sibling_low = parent->left_low
-SKIP_RIGHT_NODE:
-    sw r6, r5, 0                        # dfs_stack[top].high = sibling_high
-    sw r7, r5, 4                        # dfs_stack[top].low = sibling_low
-    sh r10, r5, 8                       # dfs_stack[top].height = height (sibling same height as us)
-    add r5, r5, 12                      # dfs_top++ (advance stack pointer by sizeof(DFS_Entry))
-DFS_LOOP_CORE_SEARCH:
-    add r13, r14, DFS_STACK             # r13 = base address of DFS_STACK
-    beq r13, r5, SIBLING_EXHAUSTED, false # if stack empty (top == base) goto SIBLING_EXHAUSTED
-    add r5, r5, -12                     # dfs_top-- (pop stack)
-    lw r4, r5, 0                        # r4 = dfs_stack[top].high
-    setmembits r4                       # set_address_bits(dfs_node_high)
-    lw r4, r5, 4                        # r4 = dfs_node = dfs_stack[top].low
-    lhu r13, r5, 8                      # r13 = dfs_node_height = dfs_stack[top].height
-    beq r13, r14, TRY_DEQUEUE, true    # if dfs_node_height == 0 goto TRY_DEQUEUE (leaf node)
-    add r13, r13, -1                    # r13 = child_height = dfs_node_height - 1
-    lw_d r11, r4, 16                    # r11 = right_high = dfs_node->right_high
-    lw_d r12, r4, 20                    # r12 = right_low = dfs_node->right_low
-    sw r11, r5, 0                       # dfs_stack[top].high = right_high (push right child)
-    sw r12, r5, 4                       # dfs_stack[top].low = right_low
-    sh r13, r5, 8                       # dfs_stack[top].height = child_height
-    add r5, r5, 12                      # dfs_top++
-    lw_d r11, r4, 8                     # r11 = left_high = dfs_node->left_high
-    lw_d r12, r4, 12                    # r12 = left_low = dfs_node->left_low
-    sw r11, r5, 0                       # dfs_stack[top].high = left_high (push left child, visited first)
-    sw r12, r5, 4                       # dfs_stack[top].low = left_low
-    sh r13, r5, 8                       # dfs_stack[top].height = child_height
-    add r5, r5, 12                      # dfs_top++
-    beq r15, r15, DFS_LOOP_CORE_SEARCH, true       # unconditional goto DFS_LOOP
-TRY_DEQUEUE:
-    add r4, r4, 8                       # r4 = count_addr = dfs_node + offsetof(idle_core_queue_dram, count)
-    atomadd_d r9, r4, -1               # r9 = old_count = atomic_add_dram(count_addr, -1)
-    bgt r9, r14, CLAIM_SLOT, false     # if old_count > 0 goto CLAIM_SLOT (successfully claimed a slot)
-    atomadd_d r9, r4, 1                # revert: atomic_add_dram(count_addr, 1)
-    beq r15, r15, DFS_LOOP_CORE_SEARCH, true       # unconditional goto DFS_LOOP (try next node)
-CLAIM_SLOT:
-    add r4, r4, -8                      # r4 = dfs_node base (head_relative is at offset 0)
-    atomadd_d r9, r4, 4                # r9 = old_head = atomic_add_dram(head_relative, 4)
-    and r9, r9, 0x7FFF                 # r9 = head_relative & 0x7FFF (wrap within 8192 slots * 4 bytes)
-    add r4, r4, r9                      # r4 = dfs_node + head_relative
-    add r4, r4, 20                      # r4 = slot_addr = dfs_node + offsetof(slots) + head_relative
-SPINLOCK_VALID:
-    lhu_d r9, r4, 2                     # r9 = is_valid = load_dram_half(slot_addr + offsetof(is_valid))
-    beq r9, r14, SPINLOCK_VALID, false # spin until is_valid != 0 (enqueuer hasn't written yet)
-    lhu_d r8, r4, 0                     # r8 = found_core_id = load_dram_half(slot_addr + offsetof(core_id))
-    sh_d r14, r4, 2                     # store_dram_half(0, slot_addr + offsetof(is_valid)) (clear slot)
-    beq r15, r15, SEARCH_DONE, true    # unconditional goto SEARCH_DONE
-SIBLING_EXHAUSTED:
-    lw r11, SAVED_BRANCH_HIGH           # r11 = saved parent_high
-    setmembits r11                      # set_address_bits(parent_high)
-    lw r6, SAVED_BRANCH_LOW            # r6 = current = saved parent_low (ascend to parent)
-    beq r15, r15, ASCEND, true         # unconditional goto ASCEND
-SEARCH_DONE:
-    or r9, r9, 0xFFFF                   # r9 = 0xFFFFFFFF (sentinel value for comparison)
-    beq r9, r8, ray_done, false        # if found_core_id == 0xFFFFFFFF (not found) goto RAY_DONE
-    sendflit r15, r8, 34               # send_flit(self.thread_id, found_core_id, 34) (probe message)
-    and r9, r15, 0xF                   # r9 = self.thread_id = r15 & 0xF
-    add r9, r9, 16                     # r9 = 16 + self.thread_id (receive channel)
-    block r9, r9                        # r9 = will_accept_change = blocking_recv(16 + self.thread_id)
-    srl r11, r9, 24                     # r11 = will_accept_change >> 24 (response code)
-    add r10, r14, 14                    # r10 = REJECT_CHANGE = 14
-    beq r11, r10, ray_done, false      # if response == REJECT_CHANGE goto RAY_DONE
-    add r10, r14, 1                     # r10 = 1
-    sendflit r10, r8, 0                # send_flit(1, found_core_id, 0) (acknowledge transfer)
-    and r11, r9, 1                      # r11 = will_accept_change & 1 (target core type: 0=leaf, 1=branch)
-    lw r12, IS_BRANCH_CORE             # r12 = self.is_branch_core
-    beq r11, r12, TRANSFER_GEO, false  # if target type == self type, skip code transfer
-    lw r12, BRANCH_START_OF_CODE       # r12 = branch_start_of_code
-    lw r5, BRANCH_NUM_INSTRUCTION_BYTES # r5 = num instruction bytes
-    add r5, r12, r5                     # r5 = end address of code region
-TRANSFER_BRANCH_CODE_LOOP:
-    lw r6, r12, 0                       # r6 = instruction_to_send = *(branch_start_of_code + i)
-    sendflit r6, r8, 0                  # send_flit(instruction_to_send, found_core_id, 0)
-    add r12, r12, 4                     # i += 4
-    bne r5, r12, TRANSFER_BRANCH_CODE_LOOP, true # loop until end of code region
-TRANSFER_GEO:
-    lw r12, BRANCH_START_OF_GEO        # r12 = branch_start_of_geometry
-    lw r5, BRANCH_SIZE_OF_GEO          # r5 = size_of_geo in bytes
-    add r5, r12, r5                     # r5 = end address of geometry region
-TRANSFER_BRANCH_GEO_LOOP:
-    lw r6, r12, 0                       # r6 = word_to_transfer = *(branch_start_of_geometry + i)
-    sendflit r6, r8, 0                  # send_flit(word_to_transfer, found_core_id, 0)
-    add r12, r12, 4                     # i += 4
-    bne r5, r12, TRANSFER_BRANCH_GEO_LOOP, true # loop until end of geometry region
-    beq r15, r15, ray_done, true       # unconditional goto RAY_DONE
+#AI[64] SEARCH_FOR_IDLE_CORES: #There's no documentation of who uses this function
+#AI[64] #I am going to assume that r3 has a return address
+#AI[64]     and r14, r14, 0                     # r14 = 0 (zero register)
+#AI[64]     lw r5, IDLE_QUEUE_HIGH      # r5 = self.idle_queue_address_high
+#AI[64]     setmembits r15, r5                  # set_address_bits(idle_queue_high)  AI fix: was set to the DFS_STACK SRAM address
+#AI[64]     add r5, r14, DFS_STACK              # r5 = &DFS_STACK (dfs stack pointer)  AI fix: moved below setmembits
+#AI[64]     lw r6, IDLE_QUEUE_LOW       # r6 = current = self.idle_queue_address_low
+#AI[64]     or r8, r8, 0xFFFF                   # r8 = 0xFFFFFFFF (found_core_id sentinel = not found)
+#AI[64]     atomadd_d r9, r6, -1                # r9 = old_count = atomic_add_dram(current.count, -1)
+#AI[64]     add r4, r6, 0                       # r4 = current (base addr of leaf idle_core_queue_dram)
+#AI[64]     bgt r9, r14, CLAIM_SLOT, false      # if old_count > 0 goto CLAIM_SLOT (fast path: slot available)
+#AI[64]     atomadd_d r9, r6, 1                 # revert: atomic_add_dram(current.count, 1)
+#AI[64]     lw_d r7, r6, 12                     # r7 = current.parent_node_high (idle_core_queue_dram.parent_node_high)
+#AI[64]     lw_d r6, r6, 16                     # r6 = current.parent_node_low (idle_core_queue_dram.parent_node_low)
+#AI[64]     setmembits r7                       # set_address_bits(parent_node_high)
+#AI[64] ASCEND:
+#AI[64]     lh_d r9, r6, 24                     #r9 = is_left
+#AI[64]     lh_d r10, r6, 26                    #r10 = height
+#AI[64]     lw_d r11, r6, 0                     #r11 = parent_high
+#AI[64]     sw r11, SAVED_BRANCH_HIGH           # save parent_high before DFS_LOOP clobbers r11
+#AI[64]     lw_d r12, r6, 4                     #r12 = parent_low
+#AI[64]     sw r12, SAVED_BRANCH_LOW            # save parent_low before DFS_LOOP clobbers r12
+#AI[64]     or r13, r13, 0xFFFF                 # r13 = 0xFFFFFFFF (sentinel for null parent)
+#AI[64]     beq r11, r13, SEARCH_DONE, false    # if parent_high == 0xFFFFFFFF goto SEARCH_DONE (reached root)
+#AI[64]     setmembits r11                      # set_address_bits(parent_high)
+#AI[64] PUSH_SIBLING:
+#AI[64]     beq r14, r9, RIGHT_NODE, false      # if is_left == 0 goto RIGHT_NODE (we are right child, sibling is left)
+#AI[64]     lw_d r6, r12, 16                    # r6 = sibling_high = parent->right_high (we are left child)
+#AI[64]     lw_d r7, r12, 20                    # r7 = sibling_low = parent->right_low
+#AI[64]     beq r15, r15, SKIP_RIGHT_NODE, true # unconditional goto SKIP_RIGHT_NODE
+#AI[64] RIGHT_NODE:
+#AI[64]     lw_d r6, r12, 8                     # r6 = sibling_high = parent->left_high (we are right child)
+#AI[64]     lw_d r7, r12, 12                    # r7 = sibling_low = parent->left_low
+#AI[64] SKIP_RIGHT_NODE:
+#AI[64]     sw r6, r5, 0                        # dfs_stack[top].high = sibling_high
+#AI[64]     sw r7, r5, 4                        # dfs_stack[top].low = sibling_low
+#AI[64]     sh r10, r5, 8                       # dfs_stack[top].height = height (sibling same height as us)
+#AI[64]     add r5, r5, 12                      # dfs_top++ (advance stack pointer by sizeof(DFS_Entry))
+#AI[64] DFS_LOOP_CORE_SEARCH:
+#AI[64]     add r13, r14, DFS_STACK             # r13 = base address of DFS_STACK
+#AI[64]     beq r13, r5, SIBLING_EXHAUSTED, false # if stack empty (top == base) goto SIBLING_EXHAUSTED
+#AI[64]     add r5, r5, -12                     # dfs_top-- (pop stack)
+#AI[64]     lw r4, r5, 0                        # r4 = dfs_stack[top].high
+#AI[64]     setmembits r4                       # set_address_bits(dfs_node_high)
+#AI[64]     lw r4, r5, 4                        # r4 = dfs_node = dfs_stack[top].low
+#AI[64]     lhu r13, r5, 8                      # r13 = dfs_node_height = dfs_stack[top].height
+#AI[64]     beq r13, r14, TRY_DEQUEUE, true    # if dfs_node_height == 0 goto TRY_DEQUEUE (leaf node)
+#AI[64]     add r13, r13, -1                    # r13 = child_height = dfs_node_height - 1
+#AI[64]     lw_d r11, r4, 16                    # r11 = right_high = dfs_node->right_high
+#AI[64]     lw_d r12, r4, 20                    # r12 = right_low = dfs_node->right_low
+#AI[64]     sw r11, r5, 0                       # dfs_stack[top].high = right_high (push right child)
+#AI[64]     sw r12, r5, 4                       # dfs_stack[top].low = right_low
+#AI[64]     sh r13, r5, 8                       # dfs_stack[top].height = child_height
+#AI[64]     add r5, r5, 12                      # dfs_top++
+#AI[64]     lw_d r11, r4, 8                     # r11 = left_high = dfs_node->left_high
+#AI[64]     lw_d r12, r4, 12                    # r12 = left_low = dfs_node->left_low
+#AI[64]     sw r11, r5, 0                       # dfs_stack[top].high = left_high (push left child, visited first)
+#AI[64]     sw r12, r5, 4                       # dfs_stack[top].low = left_low
+#AI[64]     sh r13, r5, 8                       # dfs_stack[top].height = child_height
+#AI[64]     add r5, r5, 12                      # dfs_top++
+#AI[64]     beq r15, r15, DFS_LOOP_CORE_SEARCH, true       # unconditional goto DFS_LOOP
+#AI[64] TRY_DEQUEUE:
+#AI[64]     add r4, r4, 8                       # r4 = count_addr = dfs_node + offsetof(idle_core_queue_dram, count)
+#AI[64]     atomadd_d r9, r4, -1               # r9 = old_count = atomic_add_dram(count_addr, -1)
+#AI[64]     bgt r9, r14, CLAIM_SLOT, false     # if old_count > 0 goto CLAIM_SLOT (successfully claimed a slot)
+#AI[64]     atomadd_d r9, r4, 1                # revert: atomic_add_dram(count_addr, 1)
+#AI[64]     beq r15, r15, DFS_LOOP_CORE_SEARCH, true       # unconditional goto DFS_LOOP (try next node)
+#AI[64] CLAIM_SLOT:
+#AI[64]     add r4, r4, -8                      # r4 = dfs_node base (head_relative is at offset 0)
+#AI[64]     atomadd_d r9, r4, 4                # r9 = old_head = atomic_add_dram(head_relative, 4)
+#AI[64]     and r9, r9, 0x7FFF                 # r9 = head_relative & 0x7FFF (wrap within 8192 slots * 4 bytes)
+#AI[64]     add r4, r4, r9                      # r4 = dfs_node + head_relative
+#AI[64]     add r4, r4, 20                      # r4 = slot_addr = dfs_node + offsetof(slots) + head_relative
+#AI[64] SPINLOCK_VALID:
+#AI[64]     lhu_d r9, r4, 2                     # r9 = is_valid = load_dram_half(slot_addr + offsetof(is_valid))
+#AI[64]     beq r9, r14, SPINLOCK_VALID, false # spin until is_valid != 0 (enqueuer hasn't written yet)
+#AI[64]     lhu_d r8, r4, 0                     # r8 = found_core_id = load_dram_half(slot_addr + offsetof(core_id))
+#AI[64]     sh_d r14, r4, 2                     # store_dram_half(0, slot_addr + offsetof(is_valid)) (clear slot)
+#AI[64]     beq r15, r15, SEARCH_DONE, true    # unconditional goto SEARCH_DONE
+#AI[64] SIBLING_EXHAUSTED:
+#AI[64]     lw r11, SAVED_BRANCH_HIGH           # r11 = saved parent_high
+#AI[64]     setmembits r11                      # set_address_bits(parent_high)
+#AI[64]     lw r6, SAVED_BRANCH_LOW            # r6 = current = saved parent_low (ascend to parent)
+#AI[64]     beq r15, r15, ASCEND, true         # unconditional goto ASCEND
+#AI[64] SEARCH_DONE:
+#AI[64]     or r9, r9, 0xFFFF                   # r9 = 0xFFFFFFFF (sentinel value for comparison)
+#AI[64]     beq r9, r8, ray_done, false        # if found_core_id == 0xFFFFFFFF (not found) goto RAY_DONE
+#AI[64]     sendflit r15, r8, 34               # send_flit(self.thread_id, found_core_id, 34) (probe message)
+#AI[64]     and r9, r15, 0xF                   # r9 = self.thread_id = r15 & 0xF
+#AI[64]     add r9, r9, 16                     # r9 = 16 + self.thread_id (receive channel)
+#AI[64]     block r9, r9                        # r9 = will_accept_change = blocking_recv(16 + self.thread_id)
+#AI[64]     srl r11, r9, 24                     # r11 = will_accept_change >> 24 (response code)
+#AI[64]     add r10, r14, 14                    # r10 = REJECT_CHANGE = 14
+#AI[64]     beq r11, r10, ray_done, false      # if response == REJECT_CHANGE goto RAY_DONE
+#AI[64]     add r10, r14, 1                     # r10 = 1
+#AI[64]     sendflit r10, r8, 0                # send_flit(1, found_core_id, 0) (acknowledge transfer)
+#AI[64]     and r11, r9, 1                      # r11 = will_accept_change & 1 (target core type: 0=leaf, 1=branch)
+#AI[64]     lw r12, IS_BRANCH_CORE             # r12 = self.is_branch_core
+#AI[64]     beq r11, r12, TRANSFER_GEO, false  # if target type == self type, skip code transfer
+#AI[64]     lw r12, BRANCH_START_OF_CODE       # r12 = branch_start_of_code
+#AI[64]     lw r5, BRANCH_NUM_INSTRUCTION_BYTES # r5 = num instruction bytes
+#AI[64]     add r5, r12, r5                     # r5 = end address of code region
+#AI[64] TRANSFER_BRANCH_CODE_LOOP:
+#AI[64]     lw r6, r12, 0                       # r6 = instruction_to_send = *(branch_start_of_code + i)
+#AI[64]     sendflit r6, r8, 0                  # send_flit(instruction_to_send, found_core_id, 0)
+#AI[64]     add r12, r12, 4                     # i += 4
+#AI[64]     bne r5, r12, TRANSFER_BRANCH_CODE_LOOP, true # loop until end of code region
+#AI[64] TRANSFER_GEO:
+#AI[64]     lw r12, BRANCH_START_OF_GEO        # r12 = branch_start_of_geometry
+#AI[64]     lw r5, BRANCH_SIZE_OF_GEO          # r5 = size_of_geo in bytes
+#AI[64]     add r5, r12, r5                     # r5 = end address of geometry region
+#AI[64] TRANSFER_BRANCH_GEO_LOOP:
+#AI[64]     lw r6, r12, 0                       # r6 = word_to_transfer = *(branch_start_of_geometry + i)
+#AI[64]     sendflit r6, r8, 0                  # send_flit(word_to_transfer, found_core_id, 0)
+#AI[64]     add r12, r12, 4                     # i += 4
+#AI[64]     bne r5, r12, TRANSFER_BRANCH_GEO_LOOP, true # loop until end of geometry region
+#AI[64]     beq r15, r15, ray_done, true       # unconditional goto RAY_DONE
 
 
 
 JUMP_TO_RAY_EAT_INTERRUPT:
 jmp r15, EAT_RAY_INTERRUPT
 JUMP_TO_SWITCH_ROLES_INTERRUPT:
-jmp r15, SWITCH_ROLES_INTERRUPT
+jmp r15, NOC_GEO_SEND_INTERRUPT  # AI [102]
 LEAF_START_OF_GEO:
 .data 1234
 leaf_start_of_code:
@@ -2410,19 +3116,19 @@ FOUND_LEAF_CORE_INDEX_FOR_BRANCH:
 SRAM_NODE_ALLOC_PTR:     
 .data 0
 NODE_ARRAY_TOP:         
-.data 16128
+.data 17152                  # AI [102]: was 16128 (64KB SRAM; room for the NoC clone routines)
 BRANCH_START_OF_CODE:    
 .data 44
 BRANCH_NUM_INSTRUCTION_BYTES: 
 .data 9000 #17284
 BRANCH_START_OF_GEO:     
-.data 16128
+.data 17152                  # AI fix [102]: must equal NODE_ARRAY_TOP (the leaf DFS always recurses the node at this address)
 BRANCH_SIZE_OF_GEO:      
 .data 32768
 BRANCH_IDLE_THRESHOLD:    # TODO chenge this value
 .data 1000000
 IDLE_WINDOW:             
-.data 100000
+.data 50000                               # AI [59]: was 100000 (only the clone hook uses it now)
 EAT_RAY_MASK:            
 .data 0x0001FFFF
 HALF:                    
@@ -2482,17 +3188,63 @@ TRIANGLE_ARRAY_LOW:
 INT_TO_FLOAT_TABLE_HIGH: 
 .data 0
 INT_TO_FLOAT_TABLE_LOW: 
-.data 150000
+.data 2000100000                # AI [152]: per-stack copy (was 150000 on stack 0); bit 31 set at boot
 DIV_TABLE_HIGH: 
 .data 0
 DIV_TABLE_LOW: 
-.data 61000000
+.data 2000200000                # AI [152]: per-stack copy (was 61000000 on stack 0); bit 31 set at boot
 INV_SQRT_TABLE_HIGH: 
 .data 0
 INV_SQRT_TABLE_LOW: 
-.data 100000
+.data 2000000000                # AI [152]: per-stack copy (was 100000 on stack 0); bit 31 set at boot
 IDLE_QUEUE_HIGH: #CALCULATED AT RUNTIME!!!!!! TODO
 .data 0
+CLONE_REQ_TABLE_LOW:                     # AI [53]
+.data 2500100000
+CLONE_IDLE_MAX_RAYS:
+.data 3          # AI [138] (Alex): 3 consecutive IDLE_WINDOW checks (~150K cycles) before joining the pool ([136]: 10; originally 2)
+CLONE_IDLE_STREAK:                       # AI [59]: consecutive idle checks so far
+.data 0
+CLONE_DRAIN_LIMIT:                       # AI [63]
+.data 2048
+CLONE_WARMUP:                            # AI [84]: cycles before any core may register as idle
+.data 400000
+EMERG_MIN_RAYS:                          # AI [95]: an ownerless queue goes on the emergency queue above this many rays
+.data 0
+EMERG_FLAG_LOW:                          # AI [95]: per-queue on-emergency-queue flags, stack 0, + q*4
+.data 63500000
+EMERG_TEMPLATE_LOW:                      # AI [95]: per-queue boot template {q, is_branch<<31 | node}, stack 0, + q*8 (main.rs)
+.data 63600000
+CLONE_EMERG:                             # AI [95]: claimed emergency target, (0x80000000 | q) + 1
+.data 0
+CLONE_MY_SLOT:                        # cached core_slots index of this core (O(1) leave fast path)
+.data 65535                               # AI [125]: 65535 = unknown (positive, so the index < owner_count check rejects it)
+LEAF_GEO_END:                            # AI [102]
+.data 0
+NOC_CLONED:                              # AI [102]: 1 = this boot received its geometry over the NoC
+.data 0
+NOC_GS_BUSY:                             # AI [102b]: a context of this core is streaming geometry to a clone
+.data 0
+NOC_MAGIC:                               # AI [102d]: handshake reply OFFER; +1 = REFUSE, +2 = BUSY (tag 0xE...)
+.data 0xE0000001
+NOC_GS_REPLY:                            # AI [102d]: GO/CANCEL word handed from the pipe-34 handler to the streaming context
+.data 0
+NOC_RX_TIMEOUT:                          # AI [102]: cycles a NoC clone waits for its source's offer before downloading from DRAM
+.data 100000
+NOC_GO_TIMEOUT:                          # AI [102c]: cycles a source waits for the clone's GO after offering (GO comes back within a few hundred)
+.data 20000
+CLONE_SRC_LOW:                           # AI [102]: per-core NoC clone source (core + 1), stack 0, + core*4
+.data 64000000
+CLONE_REQ_CD_LOW:                        # AI [100]: per-node clone request cooldown table, stack 0, + q*8
+.data 63800000
+CLONE_REQ_COOLDOWN:                      # AI [100]: cycles between clone requests from one node (run 70: 100000 starved hot nodes)
+.data 200000          # AI [137] (Alex): per core now, so a node with N owners asks ~N times per cooldown (growth ~exponential); was 10000 per node
+CLONE_RESIDENCY:                         # AI [100]: cycles after a clone reboot before the core may register as idle
+.data 500000          # AI [136]: was 300000 (memory model: slower ops; fewer join/leave cycles)
+CLONE_MIN_OWNERS:                        # AI [72]+[95]: minimum owners a leaf keeps when a core donates itself (0: leaves may empty)
+.data 0
+CLONE_BUSY_PULLS:
+.data -1          # AI [139] (Alex): off (unsigned compare never exceeds); busy = NoC rejects now. Was 8
 IDLE_QUEUE_LOW: 
 .data 2500000000
 RANDOM_TABLE_HIGH: 
@@ -2566,3 +3318,13 @@ ROOT_NODE_ADDRESS:
 .data -1
 EAT_RAY_RETURN_ADDR:
 .data(16) -1
+DONE_POLL_CNT:                           # AI [135]: idle passes since the last RAYS_COMPLETED poll
+.data 0
+CLONE_WARMUP_DONE:                       # AI [136c]: 1 once this core has seen 1000 completed rays (not downloaded: 0 at power-up)
+.data 0
+CLONE_NEXT_REQ:                          # AI [137]: cycle of this core's next allowed clone request (not downloaded: 0 at power-up)
+.data 0
+REJ_LAST_TS:                             # AI [143]: cycle of this core's last NoC full-reject (not downloaded: 0 at power-up)
+.data 0
+REJ_CNT:                                 # AI [143]: rejects in the current streak (each within IDLE_WINDOW of the previous)
+.data 0

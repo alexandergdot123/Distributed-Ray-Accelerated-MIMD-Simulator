@@ -1,5 +1,5 @@
 Origin = 0x0028
-Bytes = 224
+Bytes = 324
 
 ============ HEX ============
 0x00000028,   //PC = 0x00000028,     line: .data 40        # TODO Double check
@@ -9,52 +9,77 @@ Bytes = 224
 0x69696969,   //PC = 0x00000038,     line:     .data 0x69696969
 0x67676767,   //PC = 0x0000003C,     line:     .data 0x67676767
 0xCAFEBABE,   //PC = 0x00000040,     line:     .data 0xCAFEBABE
-0x00DC801F,   //PC = 0x00000044,     line:     lw r0, dram_queue_array_high    
+0x0140801F,   //PC = 0x00000044,     line:     lw r0, dram_queue_array_high    
 0x000007A7,   //PC = 0x00000048,     line:     setmembits r0   
 0x0004FF06,   //PC = 0x0000004C,     line:     srl r14, r15, 4
 0x0003F705,   //PC = 0x00000050,     line:     sll r14, r14, 3
-0x00D8809F,   //PC = 0x00000054,     line:     lw r1, dram_queue_array_low      # r1 = upper_addr
+0x013C809F,   //PC = 0x00000054,     line:     lw r1, dram_queue_array_low      # r1 = upper_addr
 0x000E0880,   //PC = 0x00000058,     line:     add r1, r1, r14
 0x0000092C,   //PC = 0x0000005C,     line:     lw_d r2, r1, 0                       # r2 = node_id
 0x000409AC,   //PC = 0x00000060,     line:     lw_d r3, r1, 4 #r3 = is_branch_core
 0x001F9A06,   //PC = 0x00000064,     line:     srl r4, r3, 31
 0x003C811A,   //PC = 0x00000068,     line:     sw r2, ROOT_NODE_ID
 0x0038821A,   //PC = 0x0000006C,     line:     sw r4, IS_BRANCH_CORE
-0x0100821F,   //PC = 0x00000070,     line:     lw r4, AND_MASK
+0x0164821F,   //PC = 0x00000070,     line:     lw r4, AND_MASK
 0x00032202,   //PC = 0x00000074,     line:     and r4, r4, r3
 0x0040821A,   //PC = 0x00000078,     line:     sw r4, NODE_INDEX_OF_ROOT
-0x00E0801F,   //PC = 0x0000007C,     line:     lw r0, dram_queue_addresses_high    
-0x000007A7,   //PC = 0x00000080,     line:     setmembits r0   
-0x00039705,   //PC = 0x00000084,     line:     sll r14, r2, 3
-0x00E4809F,   //PC = 0x00000088,     line:     lw r1, dram_queue_addresses_low      # r1 = upper_addr
-0x000E0880,   //PC = 0x0000008C,     line:     add r1, r1, r14
-0x0000092C,   //PC = 0x00000090,     line:     lw_d r2, r1, 0                       # r2 = RAY_QUEUE_HIGH
-0x000409AC,   //PC = 0x00000094,     line:     lw_d r3, r1, 4                       # r3 = RAY_QUEUE_LOW
-0x0030811A,   //PC = 0x00000098,     line:     sw r2, RAY_QUEUE_HIGH
-0x0034819A,   //PC = 0x0000009C,     line:     sw r3, RAY_QUEUE_LOW
-0x0038821F,   //PC = 0x000000A0,     line:     lw r4, IS_BRANCH_CORE
-0x00008002,   //PC = 0x000000A4,     line:     and r0, r0, 0
-0x00C08213,   //PC = 0x000000A8,     line:     beq r4, r0, download_leaf_core_code, true
-0x00E8809F,   //PC = 0x000000AC,     line:     lw r1, num_instructions_branch
-0x00EC811F,   //PC = 0x000000B0,     line:     lw r2, branch_addr_high      # r2 = branch_addr_high
-0x000017A7,   //PC = 0x000000B4,     line:     setmembits r2
-0x00F0811F,   //PC = 0x000000B8,     line:     lw r2, branch_addr_low
-0x00D0FF93,   //PC = 0x000000BC,     line:     beq r15, r15, bootloader_reuse, true
-0x00F4809F,   //PC = 0x000000C0,     line:     lw r1, num_instructions_leaf     # r1 = num_instructions_leaf
-0x00F8811F,   //PC = 0x000000C4,     line:     lw r2, leaf_addr_high
-0x000017A7,   //PC = 0x000000C8,     line:     setmembits r2
-0x00FC811F,   //PC = 0x000000CC,     line:     lw r2, leaf_addr_low             # r2 = leaf_addr_low
-0x0104819F,   //PC = 0x000000D0,     line:     lw r3, START_OF_DOWNLOADING_MORE_CODE
-0x0014FF93,   //PC = 0x000000D4,     line:     beq r15, r15, 20, true   # unconditional jump to bootloader
-0x00004E20,   //PC = 0x000000D8,     line:     .data 20000   
-0x00000000,   //PC = 0x000000DC,     line:     .data 0  
-0x00000000,   //PC = 0x000000E0,     line:     .data 0  
-0x03C25F30,   //PC = 0x000000E4,     line:     .data 63070000  
-0x00000ABE,   //PC = 0x000000E8,     line:     .data 2750   
-0x00000000,   //PC = 0x000000EC,     line:     .data 0   
-0x000001A8,   //PC = 0x000000F0,     line:     .data 424 
-0x000007D0,   //PC = 0x000000F4,     line:     .data 2000   
-0x00000000,   //PC = 0x000000F8,     line:     .data 0   
-0x03A2F068,   //PC = 0x000000FC,     line:     .data 61010024   
-0x7FFFFFFF,   //PC = 0x00000100,     line:     .data 0x7FFFFFFF
-0x00000044,   //PC = 0x00000104,     line:     .data 0x44
+0x001E9A86,   //PC = 0x0000007C,     line:     srl r5, r3, 30                       # AI [61]: boot-table bit 30 = this is a clone reboot (set by the donor)
+0x0001AA82,   //PC = 0x00000080,     line:     and r5, r5, 1
+0xFFF0829A,   //PC = 0x00000084,     line:     sw r5, 65520                         # AI [61]: flag for the firmware (unused interrupt-vector slot of pipe 60)
+0x0144801F,   //PC = 0x00000088,     line:     lw r0, dram_queue_addresses_high    
+0x000007A7,   //PC = 0x0000008C,     line:     setmembits r0   
+0x00039705,   //PC = 0x00000090,     line:     sll r14, r2, 3
+0x0148809F,   //PC = 0x00000094,     line:     lw r1, dram_queue_addresses_low      # r1 = upper_addr
+0x000E0880,   //PC = 0x00000098,     line:     add r1, r1, r14
+0x0000092C,   //PC = 0x0000009C,     line:     lw_d r2, r1, 0                       # r2 = RAY_QUEUE_HIGH
+0x000409AC,   //PC = 0x000000A0,     line:     lw_d r3, r1, 4                       # r3 = RAY_QUEUE_LOW
+0x0030811A,   //PC = 0x000000A4,     line:     sw r2, RAY_QUEUE_HIGH
+0x0034819A,   //PC = 0x000000A8,     line:     sw r3, RAY_QUEUE_LOW
+0x000017A7,   //PC = 0x000000AC,     line:     setmembits r2
+0x01040294,   //PC = 0x000000B0,     line:     bne r5, r0, INIT_SKIP_REGISTER, false  # AI [61]: a clone registers as an owner only after its firmware has booted (r0 = 0 here)
+0x000C9980,   //PC = 0x000000B4,     line:     add r3, r3, 12
+0x00019A30,   //PC = 0x000000B8,     line:     atomadd_d r4, r3, 1
+0x00041AAC,   //PC = 0x000000BC,     line:     lw_d r5, r3, 4
+0x00BCAA14,   //PC = 0x000000C0,     line:     bne r4, r5, MY_TICKET_HAS_NOT_ARRIVED, true
+0x00089980,   //PC = 0x000000C4,     line:     add r3, r3, 8
+0xE0009AB0,   //PC = 0x000000C8,     line:     atomadd_d r5, r3, -8192
+0x0000A202,   //PC = 0x000000CC,     line:     and r4, r4, 0
+0xE000A200,   //PC = 0x000000D0,     line:     add r4, r4, -8192
+0x00001AAC,   //PC = 0x000000D4,     line:     lw_d r5, r3, 0
+0x00D42294,   //PC = 0x000000D8,     line:     bne r5, r4, WAIT_FOR_WRITER_LOCK, false
+0x00049980,   //PC = 0x000000DC,     line:     add r3, r3, 4
+0x00019A30,   //PC = 0x000000E0,     line:     atomadd_d r4, r3, 1
+0x0001A205,   //PC = 0x000000E4,     line:     sll r4, r4, 1
+0x00041A00,   //PC = 0x000000E8,     line:     add r4, r3, r4
+0x0004FB06,   //PC = 0x000000EC,     line:     srl r6, r15, 4
+0x0004232E,   //PC = 0x000000F0,     line:     sh_d r6, r4, 4
+0xFFFC9980,   //PC = 0x000000F4,     line:     add r3, r3, -4
+0x20009FB0,   //PC = 0x000000F8,     line:     atomadd_d r15, r3, 8192
+0xFFFC9980,   //PC = 0x000000FC,     line:     add r3, r3, -4
+0x00019FB0,   //PC = 0x00000100,     line:     atomadd_d r15, r3, 1
+0x0038821F,   //PC = 0x00000104,     line:     lw r4, IS_BRANCH_CORE
+0x00008002,   //PC = 0x00000108,     line:     and r0, r0, 0
+0x01248213,   //PC = 0x0000010C,     line:     beq r4, r0, download_leaf_core_code, true
+0x014C809F,   //PC = 0x00000110,     line:     lw r1, num_instructions_branch
+0x0150811F,   //PC = 0x00000114,     line:     lw r2, branch_addr_high      # r2 = branch_addr_high
+0x000017A7,   //PC = 0x00000118,     line:     setmembits r2
+0x0154811F,   //PC = 0x0000011C,     line:     lw r2, branch_addr_low
+0x0134FF93,   //PC = 0x00000120,     line:     beq r15, r15, bootloader_reuse, true
+0x0158809F,   //PC = 0x00000124,     line:     lw r1, num_instructions_leaf     # r1 = num_instructions_leaf
+0x015C811F,   //PC = 0x00000128,     line:     lw r2, leaf_addr_high
+0x000017A7,   //PC = 0x0000012C,     line:     setmembits r2
+0x0160811F,   //PC = 0x00000130,     line:     lw r2, leaf_addr_low             # r2 = leaf_addr_low
+0x0168819F,   //PC = 0x00000134,     line:     lw r3, START_OF_DOWNLOADING_MORE_CODE
+0x0014FF93,   //PC = 0x00000138,     line:     beq r15, r15, 20, true   # unconditional jump to bootloader
+0x00004E20,   //PC = 0x0000013C,     line:     .data 20000   
+0x00000000,   //PC = 0x00000140,     line:     .data 0  
+0x00000000,   //PC = 0x00000144,     line:     .data 0  
+0x03C25F30,   //PC = 0x00000148,     line:     .data 63070000  
+0x00000BDF,   //PC = 0x0000014C,     line:     .data 3039   # AI [154]: image ends at RAY_ARRAY = 0x2FC0: (0x2FC0 - 0x44) / 4 = 3039 words ([152]: 3037; [B4]: 3016; [B1]: 2982; originally 2900)
+0x00000000,   //PC = 0x00000150,     line:     .data 0   
+0x000001A8,   //PC = 0x00000154,     line:     .data 424 
+0x000009C4,   //PC = 0x00000158,     line:     .data 2500  
+0x00000000,   //PC = 0x0000015C,     line:     .data 0   
+0x03A2F068,   //PC = 0x00000160,     line:     .data 61010024   
+0x3FFFFFFF,   //PC = 0x00000164,     line:     .data 0x3FFFFFFF                    # AI [61]: was 0x7FFFFFFF; bit 30 is now the clone-boot flag
+0x00000044,   //PC = 0x00000168,     line:     .data 0x44

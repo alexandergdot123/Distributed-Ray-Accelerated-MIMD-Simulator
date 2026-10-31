@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cub/cub.cuh>   // device radix sort for the shadow queries (was a host std::sort)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <chrono>
 
 #define CUDA_CHECK(call)                                                      \
     do {                                                                      \
@@ -336,6 +338,7 @@ __global__ void kTrace(
 
 __global__ void kShadow(
         const ShadowQ* __restrict__ shadowBuf,
+        const int*     __restrict__ order,     // sorted slot indices (Morton order)
         const float*   __restrict__ tris,
         const float*   __restrict__ bvh4Bounds,
         const int*     __restrict__ bvh4Meta,
@@ -348,7 +351,7 @@ __global__ void kShadow(
              si < numShadow;
              si += gridDim.x*blockDim.x)
     {
-        const ShadowQ& sq = shadowBuf[si];
+        const ShadowQ& sq = shadowBuf[order[si]];   // indirect read replaces kGather + second buffer
         if (!sq.alive) continue;
 
         Vec3 ro  = {sq.ox, sq.oy, sq.oz};
@@ -383,7 +386,7 @@ __global__ void kFinalize(
     };
 }
 
-static inline uint32_t expandBitsHost(uint32_t v)
+__host__ __device__ static inline uint32_t expandBitsHost(uint32_t v)
 {
     v = (v * 0x00010001u) & 0xFF0000FFu;
     v = (v * 0x00000101u) & 0x0F00F00Fu;
@@ -392,46 +395,35 @@ static inline uint32_t expandBitsHost(uint32_t v)
     return v;
 }
 
-static uint32_t mortonCode(float ox, float oy, float oz,
+__host__ __device__ static uint32_t mortonCode(float ox, float oy, float oz,
                            float3 sceneMin, float3 sceneExtentInv)
 {
     float nx = (ox - sceneMin.x) * sceneExtentInv.x;
     float ny = (oy - sceneMin.y) * sceneExtentInv.y;
     float nz = (oz - sceneMin.z) * sceneExtentInv.z;
-    nx = std::min(std::max(nx, 0.f), 1.f);
-    ny = std::min(std::max(ny, 0.f), 1.f);
-    nz = std::min(std::max(nz, 0.f), 1.f);
+    nx = fminf(fmaxf(nx, 0.f), 1.f);
+    ny = fminf(fmaxf(ny, 0.f), 1.f);
+    nz = fminf(fmaxf(nz, 0.f), 1.f);
     uint32_t ix = (uint32_t)(nx * 1023.f);
     uint32_t iy = (uint32_t)(ny * 1023.f);
     uint32_t iz = (uint32_t)(nz * 1023.f);
     return (expandBitsHost(ix) << 2) | (expandBitsHost(iy) << 1) | expandBitsHost(iz);
 }
 
-static void hostMortonSort(std::vector<ShadowQ>& buf,
-                           float3 sceneMin, float3 sceneExtentInv)
+// Device-side Morton sort of the shadow queries (replaces hostMortonSort: no
+// PCIe round trip, no CPU sort). Same keys as before: Morton code of the
+// origin, dead queries get 0xFFFFFFFF so they sort to the end.
+__global__ void kMortonKeys(
+        const ShadowQ* __restrict__ buf, int n,
+        float3 sceneMin, float3 sceneExtentInv,
+        uint32_t* __restrict__ keys, int* __restrict__ idx)
 {
-    int n = (int)buf.size();
-
-    // Build (key, index) pairs
-    std::vector<std::pair<uint32_t, int>> kv(n);
-    for (int i = 0; i < n; ++i) {
-        if (buf[i].alive)
-            kv[i] = {mortonCode(buf[i].ox, buf[i].oy, buf[i].oz,
-                                sceneMin, sceneExtentInv), i};
-        else
-            kv[i] = {0xFFFFFFFFu, i};  // dead queries sort to end
-    }
-
-    // Sort by Morton code
-    std::sort(kv.begin(), kv.end(),
-              [](const std::pair<uint32_t,int>& a,
-                 const std::pair<uint32_t,int>& b){ return a.first < b.first; });
-
-    // Gather into sorted order
-    std::vector<ShadowQ> sorted(n);
-    for (int i = 0; i < n; ++i)
-        sorted[i] = buf[kv[i].second];
-    buf.swap(sorted);
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const ShadowQ& q = buf[i];
+    keys[i] = q.alive ? mortonCode(q.ox, q.oy, q.oz, sceneMin, sceneExtentInv)
+                      : 0xFFFFFFFFu;
+    idx[i]  = i;
 }
 
 static bool loadScene(const std::string& path, std::vector<float>& out, int& n)
@@ -551,6 +543,7 @@ static bool writePPM(const std::string& path, const std::vector<uchar3>& img, in
 int main(int argc, char** argv)
 {
     int spp = DEFAULT_SPP;
+    int frames = 1;   // --frames N: render N frames in one run (same static scene/camera)
     std::vector<std::string> positional;
     for (int i=1;i<argc;++i){
         std::string a=argv[i];
@@ -558,6 +551,9 @@ int main(int argc, char** argv)
             spp=std::atoi(argv[++i]);
             if(spp<1) spp=1;
             if(spp>MAX_SPP) spp=MAX_SPP;
+        } else if (a=="--frames"&&i+1<argc){
+            frames=std::atoi(argv[++i]);
+            if(frames<1) frames=1;
         } else positional.push_back(a);
     }
     auto pos_or=[&](size_t i,const char* d){
@@ -569,7 +565,7 @@ int main(int argc, char** argv)
     std::string lightsPath = pos_or(3,"lights.txt");
     std::string outPath    = pos_or(4,"output.ppm");
 
-    std::printf("[host] spp = %d\n",spp);
+    std::printf("[host] spp = %d, frames = %d\n",spp,frames);
 
     std::vector<float> tris;       int numTris  = 0;
     std::vector<float> bvh4Bounds; int numNodes = 0;
@@ -611,17 +607,30 @@ int main(int argc, char** argv)
     CUDA_CHECK(cudaMalloc(&dAccumR, sizeof(float)*numPixels));
     CUDA_CHECK(cudaMalloc(&dAccumG, sizeof(float)*numPixels));
     CUDA_CHECK(cudaMalloc(&dAccumB, sizeof(float)*numPixels));
-    CUDA_CHECK(cudaMemset(dAccumR, 0, sizeof(float)*numPixels));
-    CUDA_CHECK(cudaMemset(dAccumG, 0, sizeof(float)*numPixels));
-    CUDA_CHECK(cudaMemset(dAccumB, 0, sizeof(float)*numPixels));
+    // (accumulators are zeroed at the start of each frame, in the frame loop)
 
     // Shadow buffer on device
     int shadowSlots = numPixels * SHADOW_PER_PIXEL;
     ShadowQ *dShadow = nullptr;
     CUDA_CHECK(cudaMalloc(&dShadow, sizeof(ShadowQ)*shadowSlots));
 
-    // Host shadow buffer for sorting
-    std::vector<ShadowQ> hShadow(shadowSlots);
+    // Device sort buffers (keys, indices, CUB temp storage). No sorted copy of
+    // dShadow: kShadow reads dShadow through the sorted index array instead.
+    uint32_t *dKeysIn = nullptr, *dKeysOut = nullptr;
+    int      *dIdxIn  = nullptr, *dIdxOut  = nullptr;
+    CUDA_CHECK(cudaMalloc(&dKeysIn,  sizeof(uint32_t)*shadowSlots));
+    CUDA_CHECK(cudaMalloc(&dKeysOut, sizeof(uint32_t)*shadowSlots));
+    CUDA_CHECK(cudaMalloc(&dIdxIn,   sizeof(int)*shadowSlots));
+    CUDA_CHECK(cudaMalloc(&dIdxOut,  sizeof(int)*shadowSlots));
+    void*  dSortTemp = nullptr;
+    size_t sortTempBytes = 0;
+    // DoubleBuffer form: CUB ping-pongs between our in/out arrays instead of
+    // allocating its own alternate key/value buffers inside the temp storage.
+    cub::DoubleBuffer<uint32_t> dbKeys(dKeysIn, dKeysOut);
+    cub::DoubleBuffer<int>      dbIdx (dIdxIn,  dIdxOut);
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(dSortTemp, sortTempBytes,
+                                               dbKeys, dbIdx, shadowSlots));
+    CUDA_CHECK(cudaMalloc(&dSortTemp, sortTempBytes));
 
     uchar3 *dImg = nullptr;
     CUDA_CHECK(cudaMalloc(&dImg, sizeof(uchar3)*numPixels));
@@ -636,7 +645,7 @@ int main(int argc, char** argv)
     float3 sceneMin = {FLT_MAX, FLT_MAX, FLT_MAX};
     float3 sceneMax = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
     for (int i = 0; i < numTris; ++i) {
-        const float* t = tris.data() + i*12;
+        const float* t = tris.data() + i*14;   // 14 floats per triangle (was 12: wrong scene bounds for the Morton keys)
         for (int v = 0; v < 3; ++v) {
             sceneMin.x = std::min(sceneMin.x, t[v*3+0]);
             sceneMin.y = std::min(sceneMin.y, t[v*3+1]);
@@ -652,58 +661,86 @@ int main(int argc, char** argv)
         1.f / std::max(sceneMax.z - sceneMin.z, 1e-6f)
     };
 
-    cudaEvent_t e0, e1;
-    cudaEventCreate(&e0); cudaEventCreate(&e1);
-    cudaEventRecord(e0);
-
-    for (int s = 0; s < spp; ++s) {
-        // Zero shadow buffer
-        CUDA_CHECK(cudaMemset(dShadow, 0, sizeof(ShadowQ)*shadowSlots));
-
-        // A: monolithic trace — all bounces in one kernel
-        kTrace<<<traceGrid, traceBlock>>>(
-            dTris, dBounds, dMeta, dShadow,
-            cam.pos, F, R, U, tanHalfFov, aspect, W, H, s);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Host-side Morton sort: download, sort, upload
-        CUDA_CHECK(cudaMemcpy(hShadow.data(), dShadow,
-                              sizeof(ShadowQ)*shadowSlots, cudaMemcpyDeviceToHost));
-        hostMortonSort(hShadow, sceneMin, sceneExtentInv);
-        CUDA_CHECK(cudaMemcpy(dShadow, hShadow.data(),
-                              sizeof(ShadowQ)*shadowSlots, cudaMemcpyHostToDevice));
-
-        // B: shadow any-hit on sorted queries + accumulate
-        kShadow<<<shadowGrid, shadowBlock>>>(
-            dShadow, dTris, dBounds, dMeta,
-            dAccumR, dAccumG, dAccumB, shadowSlots);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-    }
-
-    cudaEventRecord(e1);
-    cudaEventSynchronize(e1);
-    float ms = 0.f;
-    cudaEventElapsedTime(&ms, e0, e1);
-
-    long long rpp = (long long)(MAX_BOUNCES + MAX_BOUNCES * numLights) * spp;
-    std::printf("[host] kernel: %.1f ms  (~%.2f Mrays/s  %lld rays/pixel * %d spp)\n",
-                ms, (double)numPixels*rpp/(ms*1000.0), rpp/spp, spp);
-
-    // C: finalize
-    kFinalize<<<(numPixels+255)/256, 256>>>(
-        dAccumR, dAccumG, dAccumB, dImg, numPixels, 1.f/(float)spp);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    cudaEvent_t eF0, e0, e1, eF1;   // frame start, kernel start, kernel end, frame end
+    cudaEventCreate(&eF0); cudaEventCreate(&e0); cudaEventCreate(&e1); cudaEventCreate(&eF1);
 
     std::vector<uchar3> img(numPixels);
-    CUDA_CHECK(cudaMemcpy(img.data(), dImg, sizeof(uchar3)*numPixels, cudaMemcpyDeviceToHost));
+    long long rpp = (long long)(MAX_BOUNCES + MAX_BOUNCES * numLights) * spp;
+    double sumKernelMs = 0.0, sumFrameMs = 0.0;
+    float minKernelMs = FLT_MAX, maxKernelMs = 0.f;
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto wall0 = std::chrono::steady_clock::now();
+
+    for (int f = 0; f < frames; ++f) {
+        cudaEventRecord(eF0);
+        CUDA_CHECK(cudaMemset(dAccumR, 0, sizeof(float)*numPixels));
+        CUDA_CHECK(cudaMemset(dAccumG, 0, sizeof(float)*numPixels));
+        CUDA_CHECK(cudaMemset(dAccumB, 0, sizeof(float)*numPixels));
+
+        // "kernel" region: identical to the single-frame measurement
+        cudaEventRecord(e0);
+        for (int s = 0; s < spp; ++s) {
+            // Zero shadow buffer
+            CUDA_CHECK(cudaMemset(dShadow, 0, sizeof(ShadowQ)*shadowSlots));
+
+            // A: monolithic trace — all bounces in one kernel
+            kTrace<<<traceGrid, traceBlock>>>(
+                dTris, dBounds, dMeta, dShadow,
+                cam.pos, F, R, U, tanHalfFov, aspect, W, H, s);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Device-side Morton sort: keys, radix sort (sorted indices end up in dbIdx.Current())
+            kMortonKeys<<<shadowGrid, shadowBlock>>>(
+                dShadow, shadowSlots, sceneMin, sceneExtentInv, dbKeys.Current(), dbIdx.Current());
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(dSortTemp, sortTempBytes,
+                                                       dbKeys, dbIdx, shadowSlots));
+
+            // B: shadow any-hit on sorted queries + accumulate
+            kShadow<<<shadowGrid, shadowBlock>>>(
+                dShadow, dbIdx.Current(), dTris, dBounds, dMeta,
+                dAccumR, dAccumG, dAccumB, shadowSlots);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        cudaEventRecord(e1);
+
+        // C: finalize + copy the frame back (counted in frame time, not kernel time)
+        kFinalize<<<(numPixels+255)/256, 256>>>(
+            dAccumR, dAccumG, dAccumB, dImg, numPixels, 1.f/(float)spp);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaMemcpy(img.data(), dImg, sizeof(uchar3)*numPixels, cudaMemcpyDeviceToHost));
+        cudaEventRecord(eF1);
+        cudaEventSynchronize(eF1);
+
+        float ms = 0.f, frameMs = 0.f;
+        cudaEventElapsedTime(&ms, e0, e1);
+        cudaEventElapsedTime(&frameMs, eF0, eF1);
+        sumKernelMs += ms; sumFrameMs += frameMs;
+        minKernelMs = std::min(minKernelMs, ms); maxKernelMs = std::max(maxKernelMs, ms);
+        std::printf("[host] frame %d: kernel %.1f ms (~%.2f Mrays/s), frame %.1f ms\n",
+                    f, ms, (double)numPixels*rpp/(ms*1000.0), frameMs);
+    }
+
+    auto wall1 = std::chrono::steady_clock::now();
+    double wallMs = std::chrono::duration<double, std::milli>(wall1 - wall0).count();
+
+    std::printf("[host] kernel: %.1f ms avg over %d frame(s), min %.1f, max %.1f  (~%.2f Mrays/s  %lld rays/pixel * %d spp)\n",
+                sumKernelMs/frames, frames, minKernelMs, maxKernelMs,
+                (double)numPixels*rpp/((sumKernelMs/frames)*1000.0), rpp/spp, spp);
+    std::printf("[host] frames: %.1f ms avg per frame (incl. accum reset, finalize, image copy); %d frames in %.1f ms wall (%.2f fps)\n",
+                sumFrameMs/frames, frames, wallMs, frames*1000.0/wallMs);
+
     writePPM(outPath, img, W, H);
 
     cudaFree(dTris); cudaFree(dBounds); cudaFree(dMeta);
     cudaFree(dAccumR); cudaFree(dAccumG); cudaFree(dAccumB);
     cudaFree(dShadow); cudaFree(dImg);
-    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    cudaFree(dKeysIn); cudaFree(dKeysOut);
+    cudaFree(dIdxIn); cudaFree(dIdxOut); cudaFree(dSortTemp);
+    cudaEventDestroy(eF0); cudaEventDestroy(e0); cudaEventDestroy(e1); cudaEventDestroy(eF1);
     return 0;
 }

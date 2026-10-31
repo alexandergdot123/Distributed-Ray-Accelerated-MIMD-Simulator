@@ -7,6 +7,9 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
+// AI debug [40]: per-(core, pc) tally of atomic adds to one DRAM word (root queue count)
+pub const QCNT_WATCH_ADDR: usize = 1_115_000_008;
+pub static QCNT_LOG: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<(u32, u16), (i64, u64)>>> = std::sync::OnceLock::new();
 
 use crate::{CORES_IN_X_STACK, CoreLog, dram_read_word};
 
@@ -14,8 +17,25 @@ pub const FP_PIPE_STAGES: usize = 4;
 pub const DIV_LATENCY: usize = 32;
 pub const DRAM_LATENCY_FAR: u64 = 6;
 pub const DRAM_LATENCY_CLOSE: u64 = 6;
+// AI debug [85]: hit counters
+pub static NOC_WATCH_PC: [std::sync::atomic::AtomicU32; 6] = [std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX)]; // AI [102]: 0-2 branch, 3-5 leaf
+pub static NOC_WATCH_N: [std::sync::atomic::AtomicU64; 6] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+pub static DESCEND_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX); // AI [104]
+pub static DESCEND_NULL_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static LEAF_HIT_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+pub static BRANCH_HIT_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+pub static LEAF_WATCH_PC: [std::sync::atomic::AtomicU32; 4] = [std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX), std::sync::atomic::AtomicU32::new(u32::MAX)]; // AI [86]
+pub static LEAF_WATCH_N: [std::sync::atomic::AtomicU64; 4] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+thread_local! {
+    // AI [129] debug: DRAM requests issued per (firmware: 0 leaf / 1 branch, PC word, target stack), per stack thread
+    pub static DRAM_PC_HIST: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+    // AI [132] debug: instructions executed per (firmware: 0 leaf / 1 branch, PC word), per stack thread
+    pub static PC_EXEC_HIST: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+}
+pub static LEAF_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BRANCH_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub const REGS_PER_CONTEXT: usize = 16;
-pub const SRAM_SIZE: usize = 48 * 1024;
+pub const SRAM_SIZE: usize = 64 * 1024; // AI [102]: was 48KB (Alex: up to 64KB)
 pub const NUM_NOC_PIPES: usize = 64;
 pub const HIGH_CAPACITY_NOC_PIPE_CNT: usize = 16;
 pub const HIGH_CAPACITY_PIPE_SLOTS: usize = 16;
@@ -23,18 +43,45 @@ pub const OUTPUT_NOC_FIFO_CAPACITY: usize = 1;
 pub const PRIORITIZE_X: bool = false;
 pub const CORES_IN_X: u16 = 32;
 pub const CORES_IN_Y: u16 = 32;
+pub static BOOT_CLOBBER_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // AI [97]
+pub static STRAY_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // AI debug [153]: STRAY lines printed (capped)
+pub static REBOOT_STATE_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // AI debug [153]
+pub static HS_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // AI debug [156]: HS lines printed (capped)
+pub static DUMP_REQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // AI debug [158]: ((core + 1) << 8) | ctx of a STRAY sender to dump (0 = none)
+pub static HS_DUMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // AI debug [158]: sender dumps done (capped)
+// AI debug [159] (Alex: cycle-by-cycle history, ~100K cycles): per-core ring of one u32 per cycle, DRAEM_CYC_RING entries (power of 2,
+//   default 131072 = 512 KB per core, ~4 GB for 8192 cores; 0 = off). Entry = pc (bits 0-15) | ctx (16-19) | issued (bit 20) | valid (bit 21).
+pub fn cyc_ring_len() -> usize { static L: std::sync::OnceLock<usize> = std::sync::OnceLock::new(); *L.get_or_init(|| std::env::var("DRAEM_CYC_RING").ok().and_then(|v| v.trim().parse::<usize>().ok()).map(|n| if n == 0 { 0 } else { n.next_power_of_two() }).unwrap_or(131072)) }
+#[derive(Clone, Copy, Default)]
+pub struct MboxRec { pub src_core: u16, pub src_ctx: u8, pub src_isb: u8, pub src_pc: u16, pub value: u32, pub sent: u64, pub arrived: u64, pub expected: bool } // AI debug [153]
 pub const DRAM_STACK_SIZE: usize = 1 << 31;
 pub const DRAM_STACK_SIZE_LOG2: usize = 31;
-pub const NOC_FIFO_SIZE: usize = 1;
+pub const NOC_FIFO_SIZE: usize = 2; // AI [160]: was 1. Pops now free a slot for the producer only the next cycle (deterministic across threads), so a
+                                     //   1-cycle link needs 2 slots to carry one flit per cycle (credit round trip); 1 slot would halve back-to-back throughput.
 pub const NOC_FIFO_LATENCY: usize = 1;
-pub const DEBUG: bool = true;
-pub const NOC_UTIL_EPOCH_LEN: usize = 200;
+// AI [60]: per-instruction tracing is now switchable at run time: DRAEM_TRACE=0 turns it off (default on, as before).
+pub static DEBUG_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[inline]
+pub fn debug_on() -> bool { *DEBUG_FLAG.get_or_init(|| std::env::var("DRAEM_TRACE").map(|v| v.trim() != "0").unwrap_or(true)) && SIM_CYCLE.load(std::sync::atomic::Ordering::Relaxed) >= *TRACE_FROM.get_or_init(|| std::env::var("DRAEM_TRACE_FROM").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)) }
+// AI [105]: tracing starts at cycle DRAEM_TRACE_FROM (default 0); main.rs stores the current cycle each cycle. Execution is unchanged.
+pub static SIM_CYCLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static TRACE_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+pub static ENTERED_SNAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // AI [B4]: RAYS_ENTERED (stack 2) for the INFLIGHT line
+pub const NOC_UTIL_EPOCH_LEN: usize = 10000; // AI [B4] (20M-cycle runs; Alex: 10K): was 200. Per-core per-epoch stats are Vec<usize> (8 B): 20M / 200 = 100K epochs x 8192 cores x 9 metrics ~ 59 GB of RAM; 10000 -> ~1.2 GB
+pub const READY_SAMPLE: u64 = 16; // AI [144]: cycles between ready-context samples
 pub const CTX_CNT: usize = 16;
+// Router-generated rejects for ray requests (mailbox 32/33) that arrive at a full mailbox.
+pub const RAY_REQUEST_MAILBOX_EVEN: u16 = 32;
+pub const RAY_REQUEST_MAILBOX_ODD: u16 = 33;
+pub const REJECT_RAY_CODE: u32 = 7;
+pub const NOC_CLONE_NACK: u32 = 0xE000_0004; // AI [113]: router bounce for a full pipe 34 (clone firmware treats it like BUSY)
+pub const REJECT_SEND_FIFO_CAPACITY: usize = 4;
 struct Inner<T> {
     buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
     capacity: usize,
     head: AtomicUsize, // producer writes
     tail: AtomicUsize, // consumer writes
+    pop_mark: std::sync::atomic::AtomicU64, // AI [160]: (cycle << 16) | pops the consumer made in that cycle (NoC links only)
 }
 
 unsafe impl<T: Send> Send for Inner<T> {}
@@ -52,6 +99,7 @@ impl<T> Inner<T> {
             capacity,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
+            pop_mark: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -111,6 +159,23 @@ impl<T> Inner<T> {
 
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
         Some(value)
+    }
+
+    /// AI [160]: record a consumer pop made in `cyc`.
+    #[inline]
+    fn note_pop(&self, cyc: u64) {
+        let m = self.pop_mark.load(Ordering::Relaxed);
+        let v = if m >> 16 == cyc { m + 1 } else { (cyc << 16) | 1 };
+        self.pop_mark.store(v, Ordering::Release);
+    }
+
+    /// AI [160]: occupancy as of the start of cycle `cyc`: slots the consumer freed during `cyc` count as still taken, so a producer
+    ///   in another thread sees the same answer whether or not the consumer has run yet this cycle.
+    #[inline]
+    fn len_at_start(&self, cyc: u64) -> usize {
+        let m = self.pop_mark.load(Ordering::Acquire);
+        let popped = if m >> 16 == cyc { (m & 0xFFFF) as usize } else { 0 };
+        self.len() + popped
     }
 
     #[inline]
@@ -379,6 +444,26 @@ impl PrioritizedInner {
         self.lanes[flit_lane(mailbox_id)].is_full()
     }
 
+    /// AI [160]: deterministic admission across threads (start-of-cycle occupancy).
+    #[inline]
+    fn is_full_for_at(&self, mailbox_id: u16, cyc: u64) -> bool {
+        let l = &self.lanes[flit_lane(mailbox_id)];
+        l.len_at_start(cyc) >= l.capacity()
+    }
+
+    /// AI [160]: lane whose head the consumer should take in `cyc`: lane 0 if its head is ready, else lane 1 if its head is ready,
+    ///   else none. A flit pushed during `cyc` by another thread is never ready in `cyc` (latency >= 1), so a race on its visibility
+    ///   can no longer change which lane is served.
+    #[inline]
+    fn ready_lane(&self, cyc: u64) -> Option<usize> {
+        for lane in 0..2 {
+            if let Some(p) = self.lanes[lane].peek_ptr() {
+                if unsafe { p.as_ref() }.cycle_to_read <= cyc { return Some(lane); }
+            }
+        }
+        None
+    }
+
     #[inline]
     fn capacity_per_lane(&self) -> usize {
         self.lanes[0].capacity()
@@ -476,6 +561,11 @@ impl PrioritizedFlitFeeder {
     }
 
     #[inline]
+    pub fn is_full_for_at(&self, mailbox_id: u16, cyc: u64) -> bool { // AI [160]
+        self.q.is_full_for_at(mailbox_id, cyc)
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         self.q.len()
     }
@@ -487,6 +577,23 @@ impl PrioritizedFlitFeeder {
 }
 
 impl PrioritizedFlitEater {
+    /// AI [160]: peek the flit this consumer may take in `cyc` (see ready_lane); None if no head is ready.
+    #[inline]
+    pub fn peek_ready<'a>(&'a mut self, cyc: u64) -> Option<PeekGuard<'a, Flit>> {
+        let lane = self.q.ready_lane(cyc)?;
+        let ptr = self.q.lanes[lane].peek_ptr()?;
+        Some(PeekGuard { ptr, _borrow: PhantomData })
+    }
+
+    /// AI [160]: pop the same flit peek_ready returned, and record the pop for the producer's start-of-cycle view.
+    #[inline]
+    pub fn pop_ready(&mut self, cyc: u64) -> Option<Flit> {
+        let lane = self.q.ready_lane(cyc)?;
+        let f = self.q.lanes[lane].pop();
+        if f.is_some() { self.q.lanes[lane].note_pop(cyc); }
+        f
+    }
+
     #[inline]
     pub fn pop(&mut self) -> Option<Flit> {
         self.q.pop()
@@ -557,6 +664,11 @@ pub struct Flit {
     destination_y: u16,
     origin_x: u16,
     origin_y: u16,
+    // AI debug [153]: who sent it (router-generated rejects / NACKs: src_ctx 0xFE / 0xFD, src_pc 0)
+    src_ctx: u8,
+    src_isb: u8,
+    src_pc: u16,
+    sent_cycle: u64,
 }
 
 
@@ -849,7 +961,9 @@ fn decode_instruction(instruction_word: u32, pc: u16) -> DecodedInstruction {
 
     let dr_index = (instruction_word >> 7) as usize & 0xF;
     let sr1_index = (instruction_word >> 11) as usize & 0xF;
-    let sr2_index = if instruction_word & 0x7F >= 19 && instruction_word & 0x7F < 23 {
+    // Conditional branches compare dr against sr1 (sr2 slot holds the target). Includes unsigned 53/54.
+    let opcode = instruction_word & 0x7F;
+    let sr2_index = if (opcode >= 19 && opcode < 23) || opcode == 53 || opcode == 54 {
         dr_index
     } else {
         ((instruction_word >> 16) & 0xF) as usize
@@ -912,6 +1026,9 @@ pub struct LongDramOp {
     pub(crate) register_index: usize,
     pub(crate) calculated_val: u32,
     pub(crate) core_id: u32,
+    pub(crate) ready_cycle: u64, // AI [128]: cycle the core may consume it (memory model completion + return link)
+    pub(crate) sent_cycle: u64,  // AI [160]: cycle the servicing stack sent it (cross-stack replies are applied only in a later cycle)
+    pub(crate) src_stack: usize, // AI [160]: servicing stack (deterministic tie order)
 }
 
 #[derive(Clone)]
@@ -922,6 +1039,7 @@ pub struct LongDramRequest {
     pub(crate) value_to_write: u32,
     pub(crate) core_id: u32,
     pub(crate) origin_stack: usize,
+    pub(crate) issue_cycle: u64, // AI [128]: for the far-link arrival time at the target stack's cache
 }
 
 
@@ -958,8 +1076,7 @@ pub struct Core {
     fp_accumulation: Vec<u32>,
     div_seq: SpscQueue<PipelineStage>,
     context_cnt: usize,
-    dram_long_queue: SpscQueue<PipelineStage>,
-    dram_short_queue: SpscQueue<PipelineStage>,
+    dram_pending: Vec<LongDramOp>, // AI [128]: DRAM replies received but not yet due (replaces the fixed-latency dram_long_queue / dram_short_queue)
     context_in_progress: usize,
     register_file: Vec<u32>,
     register_ready: Vec<bool>,
@@ -977,6 +1094,7 @@ pub struct Core {
     right_noc_congestion: Vec<usize>,
     mailbox_congestion: Vec<usize>,
     core_busy: Vec<usize>,
+    ready_hist: [u64; 16], // AI [144] debug: samples (every READY_SAMPLE cycles) by how many worker contexts (0-14) could issue
     dram_bytes_read_close: usize,
     dram_bytes_read_far: usize,
     dram_bytes_wrote_close: usize,
@@ -993,6 +1111,23 @@ pub struct Core {
     pc: [u16; REGS_PER_CONTEXT],
 
     output_noc_send: PrioritizedFlitQueue,
+    reject_send: PrioritizedFlitQueue, // router-generated ray rejects, separate from thread sends
+    auto_rejects: usize,
+    pc_hist: Vec<(u16, u32)>, // AI debug [44]: per-context ring of the last 256 executed (pc, cycle)
+    pc_hist_idx: [usize; 16],
+    cyc_ring: Vec<u32>,          // AI debug [159]: per-cycle (pc, ctx, issued) ring, cyc_ring_len() entries
+    cyc_rec: u32,                // AI debug [159]: this cycle's entry (set when an instruction issues)
+    mailbox_full_reported: [bool; NUM_NOC_PIPES], // debug: print first full-mailbox stall per mailbox
+    mbox_last: [(u16, u16, u32, u64); 16], // AI debug [123]: last delivery per data mailbox 0-15: origin x, y, value, cycle
+    data_expect: [i32; 16],      // AI debug [153]: data words still owed to each data mailbox 0-15 by ACKs this core sent
+    req_pending: [(u16, u64, u32); 16], // AI debug [156]: per context, the ray request (32/33) awaiting a reply: dest core (0xFFFF none), cycle, word
+    ack_to: [(u16, u64); 16],    // AI debug [156]: per context, the requester core of this core's last ray ACK and its cycle
+    ack_recv: [(u32, u8, u64); 16], // AI debug [157]: per context, the last ACK word it received, data words it may still send on it, cycle
+    trace_ctx: usize,            // AI debug [158]: context being traced after an HS event
+    trace_left: u16,             // AI debug [158]: instructions of trace_ctx still to print
+    clone_go_cycle: u64,         // AI debug [153]: cycle of this core's last NoC-clone GO (pipe 0 stream legit for a while after)
+    mbox_ring: Vec<MboxRec>,     // AI debug [153]: last 8 deliveries per data mailbox 0-15 (16 x 8)
+    mbox_ring_idx: [u8; 16],
     noc_recv_fifo: Vec<SpscQueue<u32>>,
     interrupt_enable: Vec<Vec<bool>>,
 
@@ -1037,8 +1172,7 @@ impl Core {
             y_dim,
             fetch_pc: None,
             fp_pipe: SpscQueue::<PipelineStage>::new(FP_PIPE_STAGES),
-            dram_long_queue: SpscQueue::<PipelineStage>::new(DRAM_LATENCY_FAR as usize),
-            dram_short_queue: SpscQueue::<PipelineStage>::new(DRAM_LATENCY_CLOSE as usize),
+            dram_pending: Vec::new(), // AI [128]
             context_cnt: 1,
             ctx_ownership: 0,
             context_in_progress: 0,
@@ -1059,8 +1193,11 @@ impl Core {
                 for _ in 0..HIGH_CAPACITY_NOC_PIPE_CNT {
                     noc_input_pipes.push(SpscQueue::<u32>::new(HIGH_CAPACITY_PIPE_SLOTS));
                 }
-                for _ in HIGH_CAPACITY_NOC_PIPE_CNT..NUM_NOC_PIPES {
-                    noc_input_pipes.push(SpscQueue::<u32>::new(1));
+                for pipe in HIGH_CAPACITY_NOC_PIPE_CNT..NUM_NOC_PIPES {
+                    // AI [112]/[138]: pipes 32-63 (ray requests, NoC-clone handshake and spares) hold 4 flits (was 1), so a word waiting to be read
+                    // does not immediately block lane 1 at the router. 16-31 (one response per context) stay at 1 slot.
+                    // AI [138]: the ray-request mailboxes 32/33 hold 4 as well (the router still bounces a reject when full).
+                    noc_input_pipes.push(SpscQueue::<u32>::new(if pipe >= 32 { 4 } else { 1 })); // AI [138] (Alex): 32/33 too (was 1)
                 }
 
                 noc_input_pipes
@@ -1071,6 +1208,23 @@ impl Core {
             decoded_instruction: None,
             cycle: 0,
             output_noc_send: PrioritizedFlitQueue::new(OUTPUT_NOC_FIFO_CAPACITY),
+            reject_send: PrioritizedFlitQueue::new(REJECT_SEND_FIFO_CAPACITY),
+            auto_rejects: 0,
+            pc_hist: vec![(0, 0); 16 * 256],
+            pc_hist_idx: [0; 16],
+            cyc_ring: vec![0u32; cyc_ring_len()],
+            cyc_rec: 0,
+            mailbox_full_reported: [false; NUM_NOC_PIPES],
+            mbox_last: [(0, 0, 0, 0); 16],
+            data_expect: [0; 16],
+            req_pending: [(0xFFFF, 0, 0); 16],
+            ack_to: [(0xFFFF, 0); 16],
+            ack_recv: [(0, 0, 0); 16],
+            trace_ctx: 0,
+            trace_left: 0,
+            clone_go_cycle: 0,
+            mbox_ring: vec![MboxRec::default(); 16 * 8],
+            mbox_ring_idx: [0; 16],
             top_bits_dram_stack: dram_top_bits,
             dram_long_request: None,
             dram_long_response: None,
@@ -1092,6 +1246,7 @@ impl Core {
             right_noc_congestion: vec![],
             mailbox_congestion: vec![],
             core_busy: vec![],
+            ready_hist: [0; 16], // AI [144]
         }
     }
     fn dump_instruction(&self, inst: &DecodedInstruction) {
@@ -1120,6 +1275,7 @@ impl Core {
             flit_sent_manhattan_distance_traversed: self.flit_sent_manhattan_distance_traversed,
             flit_received_manhattan_distance_traversed: self
                 .flit_received_manhattan_distance_traversed,
+            auto_rejects: self.auto_rejects,
         }
     }
 
@@ -1155,10 +1311,10 @@ impl Core {
     #[inline]
     fn lane_full(&self, dir: Direction, mailbox: u16) -> bool {
         match dir {
-            Direction::Right => self.right_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
-            Direction::Left  => self.left_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
-            Direction::Up    => self.up_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
-            Direction::Down  => self.down_noc.as_ref().unwrap().feeder.is_full_for(mailbox),
+            Direction::Right => self.right_noc.as_ref().unwrap().feeder.is_full_for_at(mailbox, self.cycle), // AI [160]
+            Direction::Left  => self.left_noc.as_ref().unwrap().feeder.is_full_for_at(mailbox, self.cycle),
+            Direction::Up    => self.up_noc.as_ref().unwrap().feeder.is_full_for_at(mailbox, self.cycle),
+            Direction::Down  => self.down_noc.as_ref().unwrap().feeder.is_full_for_at(mailbox, self.cycle),
         }
     }
 
@@ -1214,10 +1370,10 @@ impl Core {
     #[inline]
     fn pop_inbound(&mut self, from: Direction) -> Flit {
         match from {
-            Direction::Right => self.right_noc.as_mut().unwrap().eater.pop().unwrap(),
-            Direction::Left  => self.left_noc.as_mut().unwrap().eater.pop().unwrap(),
-            Direction::Up    => self.up_noc.as_mut().unwrap().eater.pop().unwrap(),
-            Direction::Down  => self.down_noc.as_mut().unwrap().eater.pop().unwrap(),
+            Direction::Right => { let c = self.cycle; self.right_noc.as_mut().unwrap().eater.pop_ready(c).unwrap() } // AI [160]
+            Direction::Left  => { let c = self.cycle; self.left_noc.as_mut().unwrap().eater.pop_ready(c).unwrap() }
+            Direction::Up    => { let c = self.cycle; self.up_noc.as_mut().unwrap().eater.pop_ready(c).unwrap() }
+            Direction::Down  => { let c = self.cycle; self.down_noc.as_mut().unwrap().eater.pop_ready(c).unwrap() }
         }
     }
 
@@ -1235,6 +1391,9 @@ impl Core {
 
     /// Drain one flit (if any) from output_noc_send onto the appropriate outbound NOC.
     fn cycle_output_send(&mut self) {
+        if self.cycle_reject_send() {
+            return;
+        }
         // Peek to learn destination + mailbox without committing to pop.
         let (dest_x, dest_y, mailbox, val, orig_x, orig_y) = match self.output_noc_send.peek() {
             Some(f) => (f.destination_x, f.destination_y, f.mailbox_id, f.value_to_send, f.origin_x, f.origin_y),
@@ -1267,6 +1426,39 @@ impl Core {
         self.forward_to(dir, flit);
     }
 
+    /// Drain one router-generated reject onto the NoC. Returns true if a flit was injected.
+    fn cycle_reject_send(&mut self) -> bool {
+        let (dest_x, dest_y, mailbox) = match self.reject_send.peek() {
+            Some(f) => (f.destination_x, f.destination_y, f.mailbox_id),
+            None => return false,
+        };
+        let dir = match self.route_direction(dest_x, dest_y) {
+            Some(d) => d,
+            None => {
+                // Reject addressed to ourselves: deliver straight into the response mailbox.
+                if self.noc_recv_fifo[mailbox as usize].is_full() {
+                    return false;
+                }
+                let flit = self.reject_send.pop().unwrap();
+                let _ = self.noc_recv_fifo[mailbox as usize].push(flit.value_to_send);
+                self.flits_received += 1;
+                return true;
+            }
+        };
+        if !self.has_noc(dir) {
+            return false;
+        }
+        if self.lane_full(dir, mailbox) {
+            self.bump_congestion(dir);
+            return false;
+        }
+        self.bump_util(dir);
+        let flit = self.reject_send.pop().unwrap();
+        self.flits_sent += 1;
+        self.forward_to(dir, flit);
+        true
+    }
+
     /// Drain one flit (if any has arrived) from the eater on direction `from`,
     /// either delivering it locally or forwarding it onward.
     fn cycle_inbound(&mut self, from: Direction) {
@@ -1280,7 +1472,7 @@ impl Core {
             };
             let Some(noc) = noc_opt else { return; };
             if noc.eater.is_empty() { return; }
-            let Some(f) = noc.eater.peek() else { return; };
+            let Some(f) = noc.eater.peek_ready(self.cycle) else { return; }; // AI [160]: only a head that is ready this cycle
             (f.destination_x, f.destination_y, f.mailbox_id, f.cycle_to_read <= self.cycle, f.value_to_send, f.origin_x, f.origin_y)
         };
         if orig_x == 27 && orig_y == 34 && mailbox == 0 {
@@ -1296,10 +1488,103 @@ impl Core {
         // Local delivery.
         if dest_x == self.x_dim && dest_y == self.y_dim {
             if self.noc_recv_fifo[mailbox as usize].is_full() {
+                // Ray requests never stall the mesh: bounce a well-formed reject back to the requester.
+                if mailbox == RAY_REQUEST_MAILBOX_EVEN || mailbox == RAY_REQUEST_MAILBOX_ODD {
+                    // Reject lives on the high-priority (response) lane; if that queue is full, stall
+                    // this request (request waiting on response is the allowed dependency direction).
+                    if self.reject_send.is_full_for(16) {
+                        self.bump_mailbox_congestion();
+                        return;
+                    }
+                    let flit = self.pop_inbound(from);
+                    // request word = node_id << 17 | r15, r15 = core_id * 16 + ctx
+                    let req = flit.value_to_send;
+                    let requester = (req >> 4) & 0x1FFF;
+                    let reject = Flit {
+                        destination_x: (requester % (CORES_IN_X * CORES_IN_X_STACK) as u32) as u16,
+                        destination_y: (requester / (CORES_IN_X * CORES_IN_X_STACK) as u32) as u16,
+                        mailbox_id: 16 + (req & 0xF) as u16,
+                        value_to_send: REJECT_RAY_CODE << 24,
+                        cycle_to_read: self.cycle + 1,
+                        origin_x: self.x_dim,
+                        origin_y: self.y_dim,
+                        src_ctx: 0xFE, src_isb: 0, src_pc: 0, sent_cycle: self.cycle, // AI debug [153]
+                    };
+                    let _ = self.reject_send.push(reject);
+                    self.auto_rejects += 1;
+                    self.flits_received += 1;
+                    return;
+                }
+                // AI [113]: a full NoC-clone request pipe 34 never stalls the mesh either: NACK the requester on its
+                // response mailbox 16 (clones ask from context 0 during boot), like the 32/33 reject. Only REQUESTs use 34.
+                if mailbox == 34 {
+                    if self.reject_send.is_full_for(16) {
+                        self.bump_mailbox_congestion();
+                        return;
+                    }
+                    let _ = self.pop_inbound(from);
+                    let nack = Flit {
+                        destination_x: orig_x,
+                        destination_y: orig_y,
+                        mailbox_id: 16,
+                        value_to_send: NOC_CLONE_NACK,
+                        cycle_to_read: self.cycle + 1,
+                        origin_x: self.x_dim,
+                        origin_y: self.y_dim,
+                        src_ctx: 0xFD, src_isb: 0, src_pc: 0, sent_cycle: self.cycle, // AI debug [153]
+                    };
+                    let _ = self.reject_send.push(nack);
+                    self.auto_rejects += 1;
+                    self.flits_received += 1;
+                    return;
+                }
+                if !self.mailbox_full_reported[mailbox as usize] {
+                    self.mailbox_full_reported[mailbox as usize] = true;
+                    println!("MAILBOX FULL: core {} mailbox {} cycle {} value 0x{:08X} from ({}, {})", self.core_id, mailbox, self.cycle, val, orig_x, orig_y);
+                }
                 self.bump_mailbox_congestion();
                 return;
             }
             let flit = self.pop_inbound(from);
+            if (flit.mailbox_id as usize) < 16 { self.mbox_last[flit.mailbox_id as usize] = (flit.origin_x, flit.origin_y, flit.value_to_send, self.cycle as u64); } // AI debug [123]
+            if (16..32).contains(&(flit.mailbox_id as usize)) && flit.value_to_send >> 31 == 0 { // AI debug [156]: reply side of the handshake
+                let c = flit.mailbox_id as usize - 16;
+                let src_core = flit.origin_y * (CORES_IN_X * CORES_IN_X_STACK) + flit.origin_x;
+                let p = self.req_pending[c];
+                if (p.0 == 0xFFFF || p.0 != src_core) && HS_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3000 {
+                    println!("HS {} core {} ctx {} value 0x{:08X} hdr {} from core {} ctx {} {} pc 0x{:04X} sent {} arrived {} | pending dest {} since {} word 0x{:08X} | my ctx pc 0x{:04X} fill {}",
+                        if p.0 == 0xFFFF { "REPLY_NO_REQ" } else { "REPLY_WRONG_SRC" }, self.core_id, c, flit.value_to_send, flit.value_to_send >> 24, src_core, flit.src_ctx,
+                        if flit.src_isb != 0 { "branch" } else { "leaf" }, flit.src_pc, flit.sent_cycle, self.cycle, p.0, p.1, p.2, self.pc[c], self.noc_recv_fifo[flit.mailbox_id as usize].len());
+                }
+                if flit.value_to_send >> 24 == 5 { // AI debug [157]: this context may now send 16 data words to the core / pipe named in the ACK
+                    if self.ack_recv[c].1 != 0 && HS_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3000 {
+                        println!("HS ACK_OVERLAP core {} ctx {} new ack 0x{:08X} from core {} at {} | old ack 0x{:08X} at {} words left {}", self.core_id, c, flit.value_to_send, src_core, self.cycle, self.ack_recv[c].0, self.ack_recv[c].2, self.ack_recv[c].1);
+                                    self.hs_dump(c, "ACK_OVERLAP"); // AI debug [158]
+                    }
+                    self.ack_recv[c] = (flit.value_to_send, 16, self.cycle);
+                }
+                self.req_pending[c] = (0xFFFF, 0, 0);
+            }
+            if (flit.mailbox_id as usize) < 16 { // AI debug [153]: account every data-mailbox delivery against the ACKs this core sent
+                let m = flit.mailbox_id as usize;
+                let src_core = flit.origin_y * (CORES_IN_X * CORES_IN_X_STACK) + flit.origin_x;
+                if self.data_expect[m] > 0 && self.ack_to[m].0 != src_core && HS_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3000 { // AI debug [156]
+                    println!("HS DATA_WRONG_SRC core {} pipe {} value 0x{:08X} from core {} ctx {} {} pc 0x{:04X} sent {} arrived {} | acked core {} at {} owed {}",
+                        self.core_id, m, flit.value_to_send, src_core, flit.src_ctx, if flit.src_isb != 0 { "branch" } else { "leaf" }, flit.src_pc, flit.sent_cycle, self.cycle, self.ack_to[m].0, self.ack_to[m].1, self.data_expect[m]);
+                }
+                let expected = if self.data_expect[m] > 0 { self.data_expect[m] -= 1; true }
+                               else { m == 0 && self.cycle.saturating_sub(self.clone_go_cycle) < 1_000_000 && self.clone_go_cycle > 0 };
+                let k = self.mbox_ring_idx[m] as usize;
+                self.mbox_ring[m * 8 + k] = MboxRec { src_core, src_ctx: flit.src_ctx, src_isb: flit.src_isb, src_pc: flit.src_pc, value: flit.value_to_send, sent: flit.sent_cycle, arrived: self.cycle, expected };
+                self.mbox_ring_idx[m] = ((k + 1) & 7) as u8;
+                if !expected && STRAY_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2000 {
+                    println!("STRAY core {} pipe {} value 0x{:08X} from core {} ctx {} {} pc 0x{:04X} sent {} arrived {} | my ctx {} pc 0x{:04X} fill {} expect {:?}",
+                        self.core_id, m, flit.value_to_send, src_core, flit.src_ctx, if flit.src_isb != 0 { "branch" } else { "leaf" }, flit.src_pc, flit.sent_cycle, self.cycle,
+                        m, self.pc[m], self.noc_recv_fifo[m].len(), self.data_expect);
+                    println!("STRAY_ACK core {} pipe {} last ack to core {} at {}", self.core_id, m, self.ack_to[m].0, self.ack_to[m].1); // AI debug [156]
+                    let _ = DUMP_REQ.compare_exchange(0, ((src_core as u64 + 1) << 8) | flit.src_ctx as u64, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed); // AI debug [158]
+                }
+            }
             let _ = self.noc_recv_fifo[flit.mailbox_id as usize].push(flit.value_to_send);
             self.flits_received += 1;
             self.flit_received_manhattan_distance_traversed +=
@@ -1347,6 +1632,64 @@ impl Core {
     pub fn get_stack(&self) -> usize {
         self.top_bits_dram_stack
     }
+    // AI debug [57]: called from main.rs when a core panics: per-context pc/membits and the faulting context's last 32 executed pcs
+    // AI debug [65]: (ctx_ownership, per-context pcs, runnable flags, is_branch from the SRAM header word at 0x38)
+    pub fn debug_hist(&self, c: usize, n: usize) -> String { (256 - n..256).map(|i| { let (p, cy) = self.pc_hist[c * 256 + ((self.pc_hist_idx[c] + i) & 255)]; format!("{:04X}@{}", p, cy) }).collect::<Vec<_>>().join(" ") } // AI [82]
+    pub fn debug_membits(&self, ctx: usize) -> u32 { self.memory_bits[ctx] } // AI [92]
+    pub fn debug_reg(&self, ctx: usize, r: usize) -> u32 { self.register_file[ctx * REGS_PER_CONTEXT + r] } // AI [79]
+    pub fn debug_state(&self) -> (i8, Vec<u16>, Vec<bool>, u32) {
+        (self.ctx_ownership, self.pc.to_vec(), self.runnable.clone(), self.read_sram_word(&0x38u16))
+    }
+    /// AI debug [158]: dump one context's recent PC history and registers, then trace its next 200 instructions (HS_TRACE).
+    pub fn hs_dump(&mut self, c: usize, why: &str) {
+        if HS_DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 40 { return; }
+        let hist: Vec<String> = (192..256).map(|i| { let (p, cy) = self.pc_hist[c * 256 + ((self.pc_hist_idx[c] + i) & 255)]; format!("{:04X}@{}", p, cy) }).collect();
+        println!("HS_DUMP {} core {} ctx {} cycle {} isb {} pc 0x{:04X} membits {} runnable {} ctx_own {} | ack_recv 0x{:08X} left {} at {} | req_pending {} at {} word 0x{:08X}",
+            why, self.core_id, c, self.cycle, self.read_sram_word(&0x38u16), self.pc[c], self.memory_bits[c], self.runnable[c], self.ctx_ownership,
+            self.ack_recv[c].0, self.ack_recv[c].1, self.ack_recv[c].2, self.req_pending[c].0, self.req_pending[c].1, self.req_pending[c].2);
+        let regs: Vec<String> = (0..REGS_PER_CONTEXT).map(|r| format!("r{}={:08X}", r, self.register_file[c * REGS_PER_CONTEXT + r])).collect();
+        println!("HS_REGS core {} ctx {} {}", self.core_id, c, regs.join(" "));
+        println!("HS_HIST core {} ctx {} {}", self.core_id, c, hist.join(" "));
+        if !self.cyc_ring.is_empty() { // AI debug [159]: the whole core, cycle by cycle, oldest first. Token = ctx.pc (hex); '*' = no instruction issued.
+            //   One line per 64 cycles: 'HS_CYC core C from cycle X: tok tok ...' (runs of an identical token are written as tok xN).
+            let n = self.cyc_ring.len().min(self.cycle as usize);
+            let m = self.cyc_ring.len() - 1;
+            let start = self.cycle as usize - n;
+            let mut line = String::new();
+            let (mut prev, mut run) = (u32::MAX, 0usize);
+            let flush = |line: &mut String, prev: u32, run: usize| {
+                if run == 0 { return; }
+                let tok = if prev & (1 << 21) == 0 { "?".to_string() } else { format!("{}{:X}.{:04X}", if prev & (1 << 20) == 0 { "*" } else { "" }, (prev >> 16) & 0xF, prev & 0xFFFF) };
+                if run > 1 { line.push_str(&format!("{}x{} ", tok, run)); } else { line.push_str(&tok); line.push(' '); }
+            };
+            for i in 0..n {
+                let cyc = start + i;
+                let e = self.cyc_ring[cyc & m];
+                if e == prev { run += 1; } else { flush(&mut line, prev, run); prev = e; run = 1; }
+                if (i + 1) % 64 == 0 || i + 1 == n {
+                    flush(&mut line, prev, run); run = 0; prev = u32::MAX;
+                    println!("HS_CYC core {} from cycle {}: {}", self.core_id, cyc + 1 - (if (i + 1) % 64 == 0 { 64 } else { (i + 1) % 64 }), line.trim_end());
+                    line.clear();
+                }
+            }
+        }
+        self.trace_ctx = c;
+        self.trace_left = 200;
+    }
+    pub fn debug_dump(&self) {
+        let c = self.context_in_progress;
+        println!("CORE_DUMP core {} ctx {} pcs {:?} membits {:?}", self.core_id, c, self.pc, self.memory_bits);
+        let hist: Vec<String> = (224..256).map(|i| { let (p, cy) = self.pc_hist[c * 256 + ((self.pc_hist_idx[c] + i) & 255)]; format!("{:04X}@{}", p, cy) }).collect();
+        println!("CORE_DUMP_HIST core {} ctx {} {}", self.core_id, c, hist.join(" "));
+        let m = self.mbox_last[c & 15]; println!("CORE_DUMP_MBOX core {} ctx {} last data-mailbox flit: origin ({}, {}) = core {} value 0x{:08X} cycle {} fill {}", self.core_id, c, m.0, m.1, m.1 as u32 * 128 + m.0 as u32, m.2, m.3, self.noc_recv_fifo[c & 15].len()); // AI debug [123]
+        let p = c & 15; // AI debug [153]: last 8 deliveries to this context's data mailbox, oldest first
+        for i in 0..8 {
+            let r = self.mbox_ring[p * 8 + ((self.mbox_ring_idx[p] as usize + i) & 7)];
+            if r.arrived == 0 { continue; }
+            println!("CORE_DUMP_RING core {} pipe {} from core {} ctx {} {} pc 0x{:04X} value 0x{:08X} sent {} arrived {} expected {}", self.core_id, p, r.src_core, r.src_ctx, if r.src_isb != 0 { "branch" } else { "leaf" }, r.src_pc, r.value, r.sent, r.arrived, r.expected);
+        }
+        println!("CORE_DUMP_EXPECT core {} expect {:?}", self.core_id, self.data_expect);
+    }
     pub fn get_core_id(&self) -> u32 {
         self.core_id
     }
@@ -1380,6 +1723,7 @@ impl Core {
         }
     }
     fn write_sram_byte(&mut self, byte: u8, address: &u16) {
+        if (*address as usize) < 0x2C && self.cycle > 300_000 && BOOT_CLOBBER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 { println!("BOOT_CLOBBER core {} ctx {} pc {:04X} addr {} val {} cycle {}", self.core_id, self.context_in_progress, self.pc[self.context_in_progress], address, byte, self.cycle); } // AI [97]
         assert!(
             *address as usize <= SRAM_SIZE,
             "SRAM WRITE OUT OF BOUNDS, core: {}",
@@ -1388,6 +1732,7 @@ impl Core {
         self.sram[*address as usize] = byte;
     }
     fn write_sram_half(&mut self, half: u16, address: &u16) {
+        if (*address as usize) < 0x2C && self.cycle > 300_000 && BOOT_CLOBBER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 { println!("BOOT_CLOBBER core {} ctx {} pc {:04X} addr {} val {} cycle {}", self.core_id, self.context_in_progress, self.pc[self.context_in_progress], address, half, self.cycle); } // AI [97]
         assert!(
             *address as usize <= SRAM_SIZE,
             "SRAM WRITE OUT OF BOUNDS, core: {}",
@@ -1398,6 +1743,7 @@ impl Core {
         self.sram[*address as usize + 1] = ((half & 0xFF00) >> 8) as u8;
     }
     fn write_sram_word(&mut self, word: u32, address: &u16) {
+        if (*address as usize) < 0x2C && self.cycle > 300_000 && BOOT_CLOBBER_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 { println!("BOOT_CLOBBER core {} ctx {} pc {:04X} addr {} val {} cycle {}", self.core_id, self.context_in_progress, self.pc[self.context_in_progress], address, word, self.cycle); } // AI [97]
         assert!(
             *address as usize <= SRAM_SIZE,
             "SRAM WRITE OUT OF BOUNDS, core: {}",
@@ -1457,13 +1803,77 @@ impl Core {
         let val = u16::from_le_bytes([lo, hi]) as i16;
         val as i32 as u32
     }
+    /// AI [144] debug: could context c issue its next instruction this cycle? Schedulable (runnable, or the running / owning context), and the
+    /// operands (and, as the issue logic requires, the destination for WAW) are ready. A context spinning in a poll loop counts.
+    fn ctx_can_issue(&self, c: usize) -> bool {
+        // runnable is cleared for a getowner owner and is still false for context 0 during boot, yet both run: count them too
+        if !(self.runnable[c] || c == self.context_in_progress || self.ctx_ownership == c as i8) {
+            return false;
+        }
+        let pc = self.pc[c];
+        let word = self.read_sram_word(&pc);
+        if word & 0x7F > 56 {
+            return false; // not an instruction word (cannot be decoded)
+        }
+        let ins = decode_instruction(word, pc);
+        let b = c * REGS_PER_CONTEXT;
+        let srcs_ready = match num_source_registers(&ins) {
+            0 => true,
+            1 => self.register_ready[b + ins.sr1],
+            _ => self.register_ready[b + ins.sr1] && self.register_ready[b + ins.sr2],
+        };
+        srcs_ready && (ins.dr == REGS_PER_CONTEXT - 1 || self.register_ready[b + ins.dr])
+    }
+
+    /// AI debug [155]: NoC window stats over epochs [e0, e1) (NOC_UTIL_EPOCH_LEN cycles each). Returns per direction (R, L, U, D):
+    ///   flits forwarded and congestion stalls, plus mailbox-congestion stalls, context-switch (no-issue) cycles, a mask of the
+    ///   links this core has, and its cumulative router auto-rejects.
+    pub fn noc_window(&self, e0: usize, e1: usize) -> ([u64; 4], [u64; 4], u64, u64, u8, u64) {
+        let s = |v: &Vec<usize>| -> u64 { (e0..e1.min(v.len())).map(|i| v[i] as u64).sum() };
+        let util = [s(&self.right_noc_util), s(&self.left_noc_util), s(&self.up_noc_util), s(&self.down_noc_util)];
+        let cong = [s(&self.right_noc_congestion), s(&self.left_noc_congestion), s(&self.up_noc_congestion), s(&self.down_noc_congestion)];
+        let mask = (self.right_noc.is_some() as u8) | ((self.left_noc.is_some() as u8) << 1) | ((self.up_noc.is_some() as u8) << 2) | ((self.down_noc.is_some() as u8) << 3);
+        (util, cong, s(&self.mailbox_congestion), s(&self.core_busy), mask, self.auto_rejects as u64)
+    }
+    /// AI [160]: hash of this core's architectural state (pcs, registers, ready bits, membits, SRAM, mailbox fill) for determinism checks.
+    pub fn state_hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut mix = |x: u64| { h ^= x; h = h.wrapping_mul(0x100000001b3); };
+        for p in self.pc.iter() { mix(*p as u64); }
+        for r in self.register_file.iter() { mix(*r as u64); }
+        for (i, b) in self.register_ready.iter().enumerate() { if !*b { mix(i as u64 | 0x8000_0000); } }
+        for m in self.memory_bits.iter() { mix(*m as u64); }
+        for w in self.sram.chunks(8) { let mut x = 0u64; for (i, b) in w.iter().enumerate() { x |= (*b as u64) << (8 * i); } mix(x); }
+        for f in self.noc_recv_fifo.iter() { mix(f.len() as u64); }
+        mix(self.context_in_progress as u64);
+        h
+    }
+    pub fn ready_hist(&self) -> &[u64; 16] {
+        &self.ready_hist
+    }
+
+    #[inline]
+    fn note_dram_pc(&self, addr: usize) { // AI [129] debug: who is hammering DRAM
+        let isb = (self.read_sram_word(&0x38u16) != 0) as usize;
+        let pcw = (self.pc[self.context_in_progress] as usize / 4) & 4095;
+        let tgt = (addr / DRAM_STACK_SIZE) & 7;
+        DRAM_PC_HIST.with(|h| {
+            let mut h = h.borrow_mut();
+            if h.is_empty() { h.resize(2 * 4096 * 8, 0); }
+            h[(isb * 4096 + pcw) * 8 + tgt] += 1;
+        });
+    }
+
     pub fn read_sram_word(&self, address: &u16) -> u32 {
         assert!(
             address & 0x3 == 0,
-            "WORD NOT ALIGNED! address = 0x{:04X} ({}), core_id: {}",
+            "WORD NOT ALIGNED! address = 0x{:04X} ({}), core_id: {}, ctx {}, pc 0x{:04X}, fetch_pc {:?}", // AI: added ctx/pc for debugging
             address,
             address,
-            self.core_id
+            self.core_id,
+            self.context_in_progress,
+            self.pc[self.context_in_progress],
+            self.fetch_pc
         );
         let index0 = *address as usize;
         let index1 = index0 + 1;
@@ -1481,6 +1891,7 @@ impl Core {
     pub fn tick(
         &mut self,
         dram: &mut Vec<u32>,
+        mem: &mut crate::memory::MemSystem, // AI [128]: this stack's cache/DRAM timing model
         cores_to_monitor: &Vec<u32>,
         context_to_monitor: &i32,
     ) {
@@ -1488,7 +1899,7 @@ impl Core {
             && self.fp_pipe.peek().unwrap().cycle_to_read <= self.cycle
         {
             let fp_stage = self.fp_pipe.pop().unwrap();
-            self.register_file[fp_stage.register_index] = fp_stage.calculated_val;
+            if fp_stage.register_index % REGS_PER_CONTEXT != REGS_PER_CONTEXT - 1 { self.register_file[fp_stage.register_index] = fp_stage.calculated_val; } // AI [80]: r15 is the read-only hardware id
             self.register_ready[fp_stage.register_index] = true;
         }
 
@@ -1496,59 +1907,38 @@ impl Core {
             && self.div_seq.peek().unwrap().cycle_to_read <= self.cycle
         {
             let div_stage = self.div_seq.pop().unwrap();
-            self.register_file[div_stage.register_index] = div_stage.calculated_val;
+            if div_stage.register_index % REGS_PER_CONTEXT != REGS_PER_CONTEXT - 1 { self.register_file[div_stage.register_index] = div_stage.calculated_val; } // AI [80]
             self.register_ready[div_stage.register_index] = true;
         }
 
-        while self.dram_short_queue.peek().is_some()
-            && self.dram_short_queue.peek().unwrap().cycle_to_read <= self.cycle
-        {
-            let dram_stage = self.dram_short_queue.pop().unwrap();
-            self.register_file[dram_stage.register_index] = dram_stage.calculated_val;
-            self.register_ready[dram_stage.register_index] = true;
+        // AI [128]: DRAM replies (close and far) arrive tagged with their register and the cycle they are due.
+        //   They can complete out of order now (cache hits vs misses); the WAW interlock [81] keeps one reply in flight per register.
+        if let Some(resp) = self.dram_long_response.as_mut() {
+            while let Some(op) = resp.pop() {
+                self.dram_pending.push(op);
+            }
         }
-
-        loop {
-            let (req_cycle, req_reg) = {
-                let q = match self.dram_long_queue.peek() {
-                    Some(g) => g,
-                    None => break,
-                };
-                (q.cycle_to_read, q.register_index)
-            };
-
-            if req_cycle > self.cycle {
-                break;
+        let mut i = 0;
+        while i < self.dram_pending.len() {
+            if self.dram_pending[i].ready_cycle <= self.cycle {
+                let op = self.dram_pending.swap_remove(i);
+                let idx = op.register_index;
+                if idx % REGS_PER_CONTEXT != REGS_PER_CONTEXT - 1 {
+                    assert!(!self.register_ready[idx], "DRAM REPLY FOR A REGISTER NOT WAITING ON ONE: core {} reg {} cycle {}", self.core_id, idx, self.cycle);
+                    self.register_file[idx] = op.calculated_val; // AI [80]: r15 is the read-only hardware id
+                }
+                self.register_ready[idx] = true;
+            } else {
+                i += 1;
             }
-
-            let resp = match self.dram_long_response.as_mut() {
-                Some(r) => r,
-                None => break,
-            };
-
-            if resp.is_empty() {
-                break;
-            }
-
-            let (resp_reg, resp_val) = {
-                let g = resp.peek().unwrap(); // safe since !is_empty()
-                (g.register_index, g.calculated_val)
-            };
-
-            assert!(
-                resp_reg == req_reg,
-                "MISMATCHED REGISTER INDEX BETWEEN FAR DRAM QUEUES"
-            );
-
-            self.dram_long_queue.pop();
-            resp.pop();
-
-            let idx = resp_reg;
-            self.register_file[idx] = resp_val;
-            self.register_ready[idx] = true;
         }
 
         self.cycle_noc();
+
+        if self.cycle % READY_SAMPLE == 0 { // AI [144] debug: how many worker contexts could issue (context 15 = the interrupt loop, left out)
+            let n = (0..15).filter(|&c| self.ctx_can_issue(c)).count();
+            self.ready_hist[n] += 1;
+        }
 
         let mut flush = false;
         let mut long_latency_op = false;
@@ -1588,6 +1978,13 @@ impl Core {
                 if !dr_ready {
                     switch_ctx = true;
                 }
+            } else if instruction_to_execute.dr != REGS_PER_CONTEXT - 1
+                && !self.register_ready[instruction_to_execute.dr + self.context_in_progress * REGS_PER_CONTEXT]
+            {
+                // AI [81]: write-after-write interlock. An instruction that writes a register with a long-latency (DRAM/div/fp) result
+                //   still in flight must wait, or that late result overwrites the newer value (run 47: the pool head mask in r4 was
+                //   overwritten by a far atomadd reply, so consumers waited on duplicate slots while 749 ready slots were never taken).
+                switch_ctx = true;
             }
             if let Operation::Div | Operation::Mod = instruction_to_execute.operation {
                 if !self.div_seq.is_empty() {
@@ -1601,13 +1998,66 @@ impl Core {
             );
 
             if !switch_ctx {
+                { // AI debug [85]: count leaf triangle hits and branch COMPLETE_RAY hits (PCs set by main.rs)
+                    let pcv = self.pc[self.context_in_progress] as u32;
+                    if pcv == DESCEND_PC.load(std::sync::atomic::Ordering::Relaxed) && self.read_sram_word(&0x38u16) == 0 { // AI [104]: leaf descends to a null child?
+                        let b = self.context_in_progress * REGS_PER_CONTEXT;
+                        let r1 = self.register_file[b + 1] as u16;
+                        if self.read_sram_half_unsigned(&r1.wrapping_add(24)) == 0xFFFF && DESCEND_NULL_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                            let regs: Vec<String> = (0..16).map(|r| format!("{:X}", self.register_file[b + r])).collect();
+                            let r0 = self.register_file[b] as u16;
+                            let ray: Vec<String> = (0..16).map(|w| format!("{:X}", self.read_sram_word(&r0.wrapping_add(4 * w)))).collect();
+                            let nodeb = r1.wrapping_sub(24) & !1;
+                            let node: Vec<String> = (0..12).map(|w| format!("{:X}", self.read_sram_word(&(r1.wrapping_sub(r1 & 2)).wrapping_add(4 * w)))).collect();
+                            let _ = nodeb;
+                            println!("DESCEND_NULL core {} ctx {} cycle {} regs {} ray {} node@{:X} {}", self.core_id, self.context_in_progress, self.cycle, regs.join(" "), ray.join(" "), r1 & !2, node.join(" "));
+                        }
+                    }
+                    for w in 0..6 { if pcv == NOC_WATCH_PC[w].load(std::sync::atomic::Ordering::Relaxed) && ((self.read_sram_word(&0x38u16) != 0) == (w < 3)) { NOC_WATCH_N[w].fetch_add(1, std::sync::atomic::Ordering::Relaxed); } } // AI [102]
+                    for w in 0..4 { if pcv == LEAF_WATCH_PC[w].load(std::sync::atomic::Ordering::Relaxed) && self.read_sram_word(&0x38u16) == 0 { LEAF_WATCH_N[w].fetch_add(1, std::sync::atomic::Ordering::Relaxed); } } // AI [86]
+                    if pcv == LEAF_HIT_PC.load(std::sync::atomic::Ordering::Relaxed) || pcv == BRANCH_HIT_PC.load(std::sync::atomic::Ordering::Relaxed) {
+                        let isb = self.read_sram_word(&0x38u16) != 0;
+                        if !isb && pcv == LEAF_HIT_PC.load(std::sync::atomic::Ordering::Relaxed) { LEAF_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                        if isb && pcv == BRANCH_HIT_PC.load(std::sync::atomic::Ordering::Relaxed) { BRANCH_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    }
+                }
+                { // AI [132] debug: execution count per PC (ray-path statistics: NoC vs DRAM forwards, bounce / shadow rays)
+                    let isb = (self.read_sram_word(&0x38u16) != 0) as usize;
+                    let pcw = (self.pc[self.context_in_progress] as usize / 4) & 4095;
+                    PC_EXEC_HIST.with(|h| {
+                        let mut h = h.borrow_mut();
+                        if h.is_empty() { h.resize(2 * 4096, 0); }
+                        h[isb * 4096 + pcw] += 1;
+                    });
+                }
+                { // AI debug [44]
+                    let c = self.context_in_progress;
+                    let k = self.pc_hist_idx[c];
+                    self.pc_hist[c * 256 + k] = (self.pc[c], self.cycle as u32);
+                    self.pc_hist_idx[c] = (k + 1) & 255;
+                    self.cyc_rec = (self.pc[c] as u32) | ((c as u32) << 16) | (1 << 20) | (1 << 21); // AI debug [159]
+                    if self.trace_left > 0 && self.trace_ctx == c { // AI debug [158]
+                        self.trace_left -= 1;
+                        let rf = |r: usize| self.register_file[c * REGS_PER_CONTEXT + r];
+                        println!("HS_TRACE core {} ctx {} pc 0x{:04X} cycle {} r8 {:08X} r9 {:08X} r10 {:08X} r12 {:08X} r14 {:08X}", self.core_id, c, self.pc[c], self.cycle, rf(8), rf(9), rf(10), rf(12), rf(14));
+                    }
+                }
+                if self.pc[self.context_in_progress] == 0 && self.cycle > 1000 { // AI debug [53]: a core rebooting through the bootloader = a clone
+                    println!("CLONE_REBOOT core {} ctx {} cycle {}", self.core_id, self.context_in_progress, self.cycle);
+                    { // AI debug [153]: data still owed or queued at a reboot lands in the new image's mailboxes
+                        let fills: Vec<usize> = (0..16).map(|m| self.noc_recv_fifo[m].len()).collect();
+                        if (self.data_expect.iter().any(|&e| e != 0) || fills.iter().any(|&f| f != 0)) && REBOOT_STATE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2000 {
+                            println!("REBOOT_STATE core {} cycle {} expect {:?} fill {:?}", self.core_id, self.cycle, self.data_expect, fills);
+                        }
+                    }
+                }
                 let mut core_in_list = false;
                 for i in cores_to_monitor {
                     if self.core_id == *i {
                         core_in_list = true;
                     }
                 }
-                if DEBUG
+                if debug_on()
                     && (core_in_list || cores_to_monitor.len() == 0)
                     && (*context_to_monitor == self.context_in_progress as i32
                         || *context_to_monitor < 0)
@@ -1648,7 +2098,7 @@ impl Core {
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                                 as i32)
                                 .wrapping_add(sr2_val as i32)) as u32;
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.is_empty())
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -1752,7 +2202,7 @@ impl Core {
                             [instruction_to_execute.sr1
                                 + self.context_in_progress * REGS_PER_CONTEXT]
                             >> sr2_val;
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2210,7 +2660,7 @@ impl Core {
                             as u8;
                         if instruction_to_execute.is_imm {
                             self.write_sram_byte(byte, &(instruction_to_execute.imm_0 as u16));
-                            if DEBUG
+                            if debug_on()
                                 && (core_in_list || cores_to_monitor.len() == 0)
                                 && (*context_to_monitor == self.context_in_progress as i32
                                     || *context_to_monitor < 0)
@@ -2228,7 +2678,7 @@ impl Core {
                                 + instruction_to_execute.imm_0)
                                 as u16;
                             self.write_sram_byte(byte, &address);
-                            if DEBUG
+                            if debug_on()
                                 && (core_in_list || cores_to_monitor.len() == 0)
                                 && (*context_to_monitor == self.context_in_progress as i32
                                     || *context_to_monitor < 0)
@@ -2252,7 +2702,7 @@ impl Core {
                         };
                         self.write_sram_half(half, &(address));
                         self.pc[self.context_in_progress] += 4;
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2275,7 +2725,7 @@ impl Core {
                         self.write_sram_word(word, &address);
 
                         self.pc[self.context_in_progress] += 4;
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2299,6 +2749,21 @@ impl Core {
                                 + instruction_to_execute.imm_0 as u16
                         };
 
+                        // AI debug [41]: branch RESOLVE_START_NODE lookup (`lhu r1, r1, LEAF_CORE_LOOKUP_TABLE` at PC 0x0BF4 after [53]; update if branch code above it moves) with an index past entry 128
+                        if matches!(instruction_to_execute.operation, Operation::LoadHalfUnsigned)
+                            && self.pc[self.context_in_progress] == 0x0BFC
+                            && self.register_file[self.context_in_progress * REGS_PER_CONTEXT + instruction_to_execute.sr1] > 256
+                        {
+                            let base = self.context_in_progress * REGS_PER_CONTEXT;
+                            let ray = self.register_file[base] as u16;
+                            let words: Vec<String> = (0..16).map(|i| format!("{:08X}", self.read_sram_word(&(ray + 4 * i)))).collect();
+                            println!("BAD_START_INDEX core {} ctx {} cycle {} index*2 {} ray@{} [{}]", self.core_id, self.context_in_progress, self.cycle, self.register_file[base + instruction_to_execute.sr1], ray, words.join(" "));
+                            let c = self.context_in_progress; // AI debug [44]: local queue headers + this context's recent PC history
+                            let lq: Vec<u32> = [0x2AC4u16, 0x2AC8, 0x2ACC, 0x2AC4 + 1036, 0x2AC8 + 1036, 0x2ACC + 1036] /* LOCAL_RAY_QUEUE after [66]; update if branch data layout moves */.iter().map(|a| self.read_sram_word(a)).collect();
+                            let hist: Vec<String> = (0..256).map(|i| { let (p, cy) = self.pc_hist[c * 256 + ((self.pc_hist_idx[c] + i) & 255)]; format!("{:04X}@{}", p, cy) }).collect();
+                            println!("BAD_START_LQ core {} ctx {} even(h,t,c) {} {} {} odd(h,t,c) {} {} {}", self.core_id, c, lq[0], lq[1], lq[2] as i32, lq[3], lq[4], lq[5] as i32);
+                            println!("BAD_START_HIST core {} ctx {} {}", self.core_id, c, hist.join(" "));
+                        }
                         let value = match instruction_to_execute.operation {
                             Operation::LoadByteSigned => self.read_sram_byte_signed(&address),
 
@@ -2315,7 +2780,7 @@ impl Core {
                         self.register_file[self.context_in_progress * REGS_PER_CONTEXT
                             + instruction_to_execute.dr] = value;
 
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2409,7 +2874,7 @@ impl Core {
                         self.write_sram_word(old_val + increment, &address);
                         self.register_file[self.context_in_progress * REGS_PER_CONTEXT
                             + instruction_to_execute.dr] = old_val;
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.is_empty())
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2422,7 +2887,7 @@ impl Core {
                         self.pc[self.context_in_progress] += 4;
                     }
                     Operation::BranchEq => {
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2784,7 +3249,7 @@ impl Core {
                         self.pc[self.context_in_progress] += 4;
 
                         // Info about mailbox being checked
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -2820,7 +3285,7 @@ impl Core {
                                     + instruction_to_execute.dr] =
                                     self.pc[self.context_in_progress] as u32;
                                 self.pc[self.context_in_progress] =
-                                    SRAM_SIZE as u16 - NUM_NOC_PIPES as u16 * 4 + index as u16 * 4;
+                                    (SRAM_SIZE - NUM_NOC_PIPES * 4 + index * 4) as u16;
                             } else {
                                 self.pc[self.context_in_progress] += 4;
                             }
@@ -2936,6 +3401,7 @@ impl Core {
                         }) | (self.memory_bits[self.context_in_progress]
                             as usize)
                             << 32;
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 1;
                             let long_dram_request = LongDramRequest {
@@ -2946,6 +3412,7 @@ impl Core {
                                 value_to_write: 0,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Read), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -2961,7 +3428,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_long_queue.push(internal_long_dram_op);
+                            let _ = internal_long_dram_op; // AI [128]: no fixed-latency placeholder; the reply is tagged
                         } else {
                             self.dram_bytes_read_close += 1;
                             let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
@@ -2973,7 +3440,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_short_queue.push(load_dispatch);
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Read, reply: Some(crate::memory::Reply { origin_stack: self.top_bits_dram_stack, core_id: self.core_id, register_index: load_dispatch.register_index, value: load_dispatch.calculated_val }) }, self.cycle); // AI [128]
                         }
 
                         self.pc[self.context_in_progress] += 4;
@@ -2989,6 +3456,7 @@ impl Core {
                         }) | (self.memory_bits[self.context_in_progress]
                             as usize)
                             << 32;
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 1;
                             let long_dram_request = LongDramRequest {
@@ -2999,6 +3467,7 @@ impl Core {
                                 value_to_write: 0,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Read), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3014,7 +3483,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_long_queue.push(internal_long_dram_op);
+                            let _ = internal_long_dram_op; // AI [128]: no fixed-latency placeholder; the reply is tagged
                         } else {
                             self.dram_bytes_read_close += 1;
                             let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
@@ -3025,7 +3494,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_short_queue.push(load_dispatch);
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Read, reply: Some(crate::memory::Reply { origin_stack: self.top_bits_dram_stack, core_id: self.core_id, register_index: load_dispatch.register_index, value: load_dispatch.calculated_val }) }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3046,6 +3515,7 @@ impl Core {
                             self.pc[self.context_in_progress],
                             dram_address
                         );
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 2;
                             let long_dram_request = LongDramRequest {
@@ -3056,6 +3526,7 @@ impl Core {
                                 value_to_write: 0,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Read), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3071,7 +3542,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_long_queue.push(internal_long_dram_op);
+                            let _ = internal_long_dram_op; // AI [128]: no fixed-latency placeholder; the reply is tagged
                         } else {
                             self.dram_bytes_read_close += 2;
                             let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
@@ -3083,7 +3554,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_short_queue.push(load_dispatch);
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Read, reply: Some(crate::memory::Reply { origin_stack: self.top_bits_dram_stack, core_id: self.core_id, register_index: load_dispatch.register_index, value: load_dispatch.calculated_val }) }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3104,6 +3575,7 @@ impl Core {
                             self.pc[self.context_in_progress],
                             dram_address
                         );
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 2;
                             let long_dram_request = LongDramRequest {
@@ -3114,6 +3586,7 @@ impl Core {
                                 value_to_write: 0,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Read), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3129,7 +3602,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_long_queue.push(internal_long_dram_op);
+                            let _ = internal_long_dram_op; // AI [128]: no fixed-latency placeholder; the reply is tagged
                         } else {
                             self.dram_bytes_read_close += 2;
                             let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
@@ -3142,7 +3615,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_short_queue.push(load_dispatch);
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Read, reply: Some(crate::memory::Reply { origin_stack: self.top_bits_dram_stack, core_id: self.core_id, register_index: load_dispatch.register_index, value: load_dispatch.calculated_val }) }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3163,7 +3636,7 @@ impl Core {
                             self.pc[self.context_in_progress],
                             dram_address
                         );
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.len() == 0)
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -3171,6 +3644,7 @@ impl Core {
                             println!("address: {}", dram_address);
                         }
                         // println!("DRAM ADDRESS FOR CORE {}: {:08X}", self.core_id, dram_address);
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_read_far += 4;
                             let long_dram_request = LongDramRequest {
@@ -3181,6 +3655,7 @@ impl Core {
                                 value_to_write: 0,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Read), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3196,7 +3671,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_long_queue.push(internal_long_dram_op);
+                            let _ = internal_long_dram_op; // AI [128]: no fixed-latency placeholder; the reply is tagged
                         } else {
                             self.dram_bytes_read_close += 4;
                             let value = dram[(dram_address % DRAM_STACK_SIZE) / 4];
@@ -3206,8 +3681,8 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_short_queue.push(load_dispatch);
-                            if DEBUG
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Read, reply: Some(crate::memory::Reply { origin_stack: self.top_bits_dram_stack, core_id: self.core_id, register_index: load_dispatch.register_index, value: load_dispatch.calculated_val }) }, self.cycle); // AI [128]
+                            if debug_on()
                                 && (core_in_list || cores_to_monitor.len() == 0)
                                 && (*context_to_monitor == self.context_in_progress as i32
                                     || *context_to_monitor < 0)
@@ -3238,6 +3713,7 @@ impl Core {
                         let value_to_store = self.register_file[self.context_in_progress
                             * REGS_PER_CONTEXT
                             + instruction_to_execute.dr];
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_wrote_far += 4;
                             let long_dram_request = LongDramRequest {
@@ -3247,6 +3723,7 @@ impl Core {
                                 value_to_write: value_to_store,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Write), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3259,6 +3736,7 @@ impl Core {
                         } else {
                             self.dram_bytes_wrote_close += 4;
                             dram[(dram_address % DRAM_STACK_SIZE) / 4] = value_to_store;
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Write, reply: None }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
 
@@ -3286,6 +3764,7 @@ impl Core {
                             * REGS_PER_CONTEXT
                             + instruction_to_execute.dr]
                             & 0xFFFF;
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_wrote_far += 2;
                             let long_dram_request = LongDramRequest {
@@ -3295,6 +3774,7 @@ impl Core {
                                 value_to_write: value_to_store,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Write), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3312,6 +3792,7 @@ impl Core {
                             value_to_store =
                                 (old_value & !(0xFFFF << (byte_offset * 8))) | value_to_store;
                             dram[(dram_address % DRAM_STACK_SIZE) / 4] = value_to_store;
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Write, reply: None }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3329,6 +3810,7 @@ impl Core {
                             * REGS_PER_CONTEXT
                             + instruction_to_execute.dr]
                             & 0xFF;
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_wrote_far += 1;
                             let long_dram_request = LongDramRequest {
@@ -3338,6 +3820,7 @@ impl Core {
                                 value_to_write: value_to_store,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Write), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3355,6 +3838,7 @@ impl Core {
                             value_to_store =
                                 (old_value & !(0xFF << (byte_offset * 8))) | value_to_store;
                             dram[(dram_address % DRAM_STACK_SIZE) / 4] = value_to_store;
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Write, reply: None }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3364,7 +3848,7 @@ impl Core {
                             self.register_file[self.context_in_progress * REGS_PER_CONTEXT
                                 + instruction_to_execute.sr1] as usize
                                 | (self.memory_bits[self.context_in_progress] as usize) << 32;
-                        if DEBUG
+                        if debug_on()
                             && (core_in_list || cores_to_monitor.is_empty())
                             && (*context_to_monitor == self.context_in_progress as i32
                                 || *context_to_monitor < 0)
@@ -3381,6 +3865,13 @@ impl Core {
                             self.register_file[self.context_in_progress * REGS_PER_CONTEXT
                                 + instruction_to_execute.sr2]
                         };
+                        // AI debug [40]: tally every atomic add to the watched queue-count word, keyed by (core, pc)
+                        if dram_address == QCNT_WATCH_ADDR {
+                            let mut m = QCNT_LOG.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new())).lock().unwrap();
+                            let e = m.entry((self.core_id, self.pc[self.context_in_progress])).or_insert((0i64, 0u64));
+                            e.0 += value_to_store as i32 as i64;
+                            e.1 += 1;
+                        }
                         assert!(
                             dram_address & 0x3 == 0,
                             "DRAM Word LOADS CAN'T BE UNALIGNED; PC: {:08X}, DRAM ADDRESS: {:08X}, CORE {}",
@@ -3388,6 +3879,7 @@ impl Core {
                             dram_address,
                             self.core_id
                         );
+                        self.note_dram_pc(dram_address); // AI [129] debug
                         if self.top_bits_dram_stack != dram_address / DRAM_STACK_SIZE {
                             self.dram_bytes_wrote_far += 4;
                             self.dram_bytes_read_far += 4;
@@ -3399,6 +3891,7 @@ impl Core {
                                 value_to_write: value_to_store,
                                 core_id: self.core_id,
                                 origin_stack: self.top_bits_dram_stack,
+                                issue_cycle: mem.depart_far(self.cycle, crate::memory::MemKind::Atomic), // AI [128]/[131]: departure over this stack's outgoing link
                             };
                             if let Some(dram_request) = &self.dram_long_request {
                                 let could_send = dram_request[dram_address / DRAM_STACK_SIZE]
@@ -3414,7 +3907,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_long_queue.push(internal_long_dram_op);
+                            let _ = internal_long_dram_op; // AI [128]: no fixed-latency placeholder; the reply is tagged
                         } else {
                             self.dram_bytes_wrote_close += 4;
                             self.dram_bytes_read_close += 4;
@@ -3426,7 +3919,7 @@ impl Core {
                                 register_index: instruction_to_execute.dr
                                     + self.context_in_progress * REGS_PER_CONTEXT,
                             };
-                            let _ = self.dram_short_queue.push(load_dispatch);
+                            mem.submit_local(crate::memory::MemReq { arrival: self.cycle, addr: dram_address % DRAM_STACK_SIZE, kind: crate::memory::MemKind::Atomic, reply: Some(crate::memory::Reply { origin_stack: self.top_bits_dram_stack, core_id: self.core_id, register_index: load_dispatch.register_index, value: load_dispatch.calculated_val }) }, self.cycle); // AI [128]
                         }
                         self.pc[self.context_in_progress] += 4;
                     }
@@ -3457,6 +3950,10 @@ impl Core {
                             cycle_to_read: self.cycle + 1,
                             origin_x: self.x_dim,
                             origin_y: self.y_dim,
+                            src_ctx: self.context_in_progress as u8, // AI debug [153]
+                            src_isb: (self.read_sram_word(&0x38u16) != 0) as u8,
+                            src_pc: self.pc[self.context_in_progress] as u16,
+                            sent_cycle: self.cycle,
                         };
                         /* Rejection Flits -> top 8 its of the 32 bit value isn't 5*/
                         // if (mailbox_index as u16 == 33 || mailbox_index as u16 == 13 || mailbox_index as u16 == 29) {
@@ -3478,8 +3975,39 @@ impl Core {
                         } else {
                             let _ = self.output_noc_send.push(outgoing_flit.clone());
                             self.pc[self.context_in_progress] += 4;
+                            // AI debug [153]: a ray ACK (5 << 24 | my core * 16 + ctx, to a response mailbox 16-31) promises 16 words on my
+                            //   data mailbox ctx; a NoC-clone GO (0xC0000000 | id) means a geometry stream on my pipe 0.
+                            if (16..32).contains(&mailbox_index) {
+                                if value_to_send >> 24 == 5 { self.data_expect[(value_to_send & 0xF) as usize] += 16; self.ack_to[(value_to_send & 0xF) as usize] = (core_address as u16, self.cycle); }
+                                if value_to_send >> 30 == 3 { self.clone_go_cycle = self.cycle; }
+                            }
+                            // AI debug [156]: sender side of the ray handshake. A context sends one request on 32/33 and must get exactly one
+                            //   reply (ACK 5 / reject 7 / wrong core 8 / router auto-reject) on 16 + ctx from that same core.
+                            if mailbox_index == 32 || mailbox_index == 33 {
+                                let c = self.context_in_progress;
+                                if self.req_pending[c].0 != 0xFFFF && HS_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3000 {
+                                    println!("HS REQ_OVERWRITE core {} ctx {} pc 0x{:04X} new dest {} cycle {} | old dest {} cycle {} word 0x{:08X}", self.core_id, c, self.pc[c].wrapping_sub(4), core_address, self.cycle, self.req_pending[c].0, self.req_pending[c].1, self.req_pending[c].2);
+                                }
+                                self.req_pending[c] = (core_address as u16, self.cycle, value_to_send);
+                                if self.ack_recv[c].1 != 0 && HS_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3000 { // AI debug [157]
+                                    println!("HS STREAM_ABANDONED core {} ctx {} pc 0x{:04X} cycle {} new request to core {} | ack 0x{:08X} at {} words left {}", self.core_id, self.context_in_progress, self.pc[self.context_in_progress].wrapping_sub(4), self.cycle, core_address, self.ack_recv[c].0, self.ack_recv[c].2, self.ack_recv[c].1);
+                                    self.hs_dump(c, "STREAM_ABANDONED"); // AI debug [158]
+                                }
+                            }
+                            if mailbox_index < 16 { // AI debug [157]: sender side of a ray stream: every data word must follow an ACK from that core / pipe
+                                let c = self.context_in_progress;
+                                let a = self.ack_recv[c];
+                                let (ack_core, ack_pipe) = ((a.0 >> 4) & 0x1FFF, a.0 & 0xF);
+                                if a.1 > 0 && ack_core == core_address && ack_pipe == mailbox_index {
+                                    self.ack_recv[c].1 -= 1;
+                                } else if mailbox_index != 0 && HS_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3000 {
+                                    println!("HS SEND_NO_ACK core {} ctx {} pc 0x{:04X} cycle {} to core {} pipe {} value 0x{:08X} | last ack 0x{:08X} (core {} pipe {}) at {} words left {}",
+                                        self.core_id, c, self.pc[c].wrapping_sub(4), self.cycle, core_address, mailbox_index, value_to_send, a.0, ack_core, ack_pipe, a.2, a.1);
+                                    self.hs_dump(c, "SEND_NO_ACK"); // AI debug [158]
+                                }
+                            }
                         }
-                        // if DEBUG
+                        // if debug_on()
                         //     && (core_in_list || cores_to_monitor.len() == 0)
                         //     && (*context_to_monitor == self.context_in_progress as i32
                         //         || *context_to_monitor < 0)
@@ -3570,6 +4098,8 @@ impl Core {
                     | Operation::BranchEq
                     | Operation::BranchGT
                     | Operation::BranchLTE
+                    | Operation::BranchLTEU
+                    | Operation::BranchGTU
             );
 
             if (is_control && instr.branch_hint)
@@ -3591,6 +4121,13 @@ impl Core {
 
         self.decoded_instruction = next_decoded;
 
+        if !self.cyc_ring.is_empty() { // AI debug [159]: no instruction issued this cycle -> record the context in progress and its pc, issued = 0
+            let c = self.context_in_progress;
+            let e = if self.cyc_rec != 0 { self.cyc_rec } else { (self.pc[c] as u32) | ((c as u32) << 16) | (1 << 21) };
+            let m = self.cyc_ring.len() - 1;
+            self.cyc_ring[(self.cycle as usize) & m] = e;
+            self.cyc_rec = 0;
+        }
         self.cycle += 1;
     }
 }

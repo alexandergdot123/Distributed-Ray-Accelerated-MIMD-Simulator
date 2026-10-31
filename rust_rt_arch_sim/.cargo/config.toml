@@ -1,0 +1,3 @@
+# AI [73]: separate build dir so a queued run can build while an older run's exe is still running
+[build]
+target-dir = "target_q"

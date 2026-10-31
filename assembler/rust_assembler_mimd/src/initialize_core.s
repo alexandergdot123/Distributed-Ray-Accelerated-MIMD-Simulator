@@ -36,6 +36,9 @@ INITIALIZE_CORE:
     lw r4, AND_MASK
     and r4, r4, r3
     sw r4, NODE_INDEX_OF_ROOT
+    srl r5, r3, 30                       # AI [61]: boot-table bit 30 = this is a clone reboot (set by the donor)
+    and r5, r5, 1
+    sw r5, 65520                         # AI [61]: flag for the firmware (unused interrupt-vector slot of pipe 60)
     lw r0, dram_queue_addresses_high    
 
     setmembits r0   
@@ -51,6 +54,7 @@ INITIALIZE_CORE:
     sw r2, RAY_QUEUE_HIGH
     sw r3, RAY_QUEUE_LOW
     setmembits r2
+    bne r5, r0, INIT_SKIP_REGISTER, false  # AI [61]: a clone registers as an owner only after its firmware has booted (r0 = 0 here)
     add r3, r3, 12
     atomadd_d r4, r3, 1
 MY_TICKET_HAS_NOT_ARRIVED:
@@ -74,7 +78,7 @@ WAIT_FOR_WRITER_LOCK:
     add r3, r3, -4
     atomadd_d r15, r3, 1
 
-
+INIT_SKIP_REGISTER:
     lw r4, IS_BRANCH_CORE
     and r0, r0, 0
     beq r4, r0, download_leaf_core_code, true
@@ -122,18 +126,18 @@ dram_queue_addresses_high:
 dram_queue_addresses_low:
     .data 63070000  
 num_instructions_branch:
-    .data 2750   
+    .data 3039   # AI [154]: image ends at RAY_ARRAY = 0x2FC0: (0x2FC0 - 0x44) / 4 = 3039 words ([152]: 3037; [B4]: 3016; [B1]: 2982; originally 2900)
 branch_addr_high:
     .data 0   
 branch_addr_low:
     .data 424 
 num_instructions_leaf:
-    .data 2350  
+    .data 2500  
 leaf_addr_high:
     .data 0   
 leaf_addr_low:
     .data 61010024   
 AND_MASK:
-    .data 0x7FFFFFFF
+    .data 0x3FFFFFFF                    # AI [61]: was 0x7FFFFFFF; bit 30 is now the clone-boot flag
 START_OF_DOWNLOADING_MORE_CODE:
     .data 0x44
